@@ -1,0 +1,435 @@
+{% extends "base.html" %}
+
+{% block title %}SMTP Configuration - ANAGHA SOLUTION{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-cog"></i> SMTP Configuration</h1>
+</div>
+
+<div class="form-container">
+    <h2>Add New SMTP Server</h2>
+    <form id="smtpForm">
+        <div class="form-group">
+            <label>Server Name *</label>
+            <input type="text" name="name" value="UABIOTECH SMTP" required>
+        </div>
+        
+        <div class="form-group">
+            <label>SMTP Host *</label>
+            <input type="text" name="host" value="smtpout.secureserver.net" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Port *</label>
+            <input type="number" name="port" value="465" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Username (Email) *</label>
+            <input type="email" name="username" value="info@uabiotech.in" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Password *</label>
+            <input type="password" name="password" value="Uabiotech*2309" required>
+        </div>
+        
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="use_ssl" checked> Use SSL
+            </label>
+        </div>
+        
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="use_tls"> Use TLS
+            </label>
+        </div>
+        
+        <div class="form-group">
+            <label>Max Emails Per Hour</label>
+            <input type="number" name="max_per_hour" value="100">
+        </div>
+        
+        <hr style="margin: 20px 0; border: 1px solid #ddd;">
+        <h3 style="margin: 15px 0 10px 0; color: #2c3e50;">IMAP Settings (Save to Sent Folder)</h3>
+        <p style="color: #7f8c8d; font-size: 12px; margin-bottom: 15px;">
+            Configure IMAP to save sent emails to your webmail Sent folder. 
+            Usually same as SMTP host but with "mail." prefix or "imap." prefix.
+        </p>
+        
+        <div class="form-group">
+            <label>IMAP Host (e.g., mail.secureserver.net or imap.secureserver.net)</label>
+            <input type="text" name="imap_host" placeholder="mail.secureserver.net">
+            <small style="color: #7f8c8d;">Leave empty to disable saving to Sent folder</small>
+        </div>
+        
+        <div class="form-group">
+            <label>IMAP Port</label>
+            <input type="number" name="imap_port" value="993" min="1" max="65535">
+            <small style="color: #7f8c8d;">Default: 993 (SSL) or 143 (TLS)</small>
+        </div>
+        
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="save_to_sent" checked> Save sent emails to IMAP Sent folder
+            </label>
+        </div>
+        
+        <hr style="margin: 20px 0; border: 1px solid #ddd;">
+        
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="set_as_default" id="setAsDefault"> Set as Default SMTP Server
+            </label>
+            <small style="color: #7f8c8d; display: block; margin-top: 5px;">
+                Default server will be used for sending emails
+            </small>
+        </div>
+        
+        <button type="button" class="btn btn-primary" onclick="testConnection()">
+            <i class="fas fa-plug"></i> Test Connection
+        </button>
+        <button type="submit" class="btn btn-success">
+            <i class="fas fa-save"></i> Add SMTP Server
+        </button>
+        <button type="button" class="btn btn-secondary" onclick="clearForm()">
+            <i class="fas fa-times"></i> Clear Form
+        </button>
+    </form>
+</div>
+
+<div class="table-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+        <h2 style="margin: 0;">Configured SMTP Servers</h2>
+        <button class="btn btn-primary" onclick="refreshServers()">
+            <i class="fas fa-sync"></i> Refresh
+        </button>
+    </div>
+    <table id="serversTable">
+        <thead>
+            <tr>
+                <th>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span>Default</span>
+                        <span>|</span>
+                        <span>Load</span>
+                        <span>|</span>
+                        <span>Name</span>
+                    </div>
+                </th>
+                <th>Host</th>
+                <th>Port</th>
+                <th>Username</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="serversTableBody">
+            {% for server in servers %}
+            <tr data-server-id="{{ server.id }}">
+                <td>
+                    <input type="radio" name="default_smtp" value="{{ server.id }}" 
+                           {% if server.is_active and loop.first %}checked{% endif %}
+                           onchange="setDefaultSMTP({{ server.id }})">
+                    <input type="radio" name="select_smtp" value="{{ server.id }}" 
+                           onchange="loadSMTPConfig({{ server.id }})" style="margin-left: 15px;" title="Load for testing">
+                    {{ server.name }}
+                </td>
+                <td>{{ server.host }}</td>
+                <td>{{ server.port }}</td>
+                <td>{{ server.username }}</td>
+                <td>
+                    <span class="status-badge {{ 'active' if server.is_active else 'inactive' }}">
+                        {{ 'Active' if server.is_active else 'Inactive' }}
+                    </span>
+                </td>
+                <td>
+                    <button class="btn btn-primary btn-sm" onclick="loadSMTPConfig({{ server.id }})" title="Load for testing">
+                        <i class="fas fa-edit"></i> Load
+                    </button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteServer({{ server.id }}, '{{ server.name }}')">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                    <button class="btn btn-info btn-sm" onclick="toggleServerStatus({{ server.id }}, {{ 1 if server.is_active else 0 }})">
+                        <i class="fas fa-{{ 'pause' if server.is_active else 'play' }}"></i> {{ 'Deactivate' if server.is_active else 'Activate' }}
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+            {% if not servers %}
+            <tr>
+                <td colspan="6" style="text-align: center; padding: 20px; color: #7f8c8d;">
+                    No SMTP servers configured. Add one above.
+                </td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.btn-sm {
+    padding: 5px 10px;
+    font-size: 12px;
+    margin: 2px;
+}
+
+.status-badge {
+    padding: 4px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: bold;
+}
+
+.status-badge.active {
+    background: #2ecc71;
+    color: white;
+}
+
+.status-badge.inactive {
+    background: #95a5a6;
+    color: white;
+}
+
+#serversTable {
+    width: 100%;
+}
+
+#serversTable td {
+    vertical-align: middle;
+}
+
+#serversTable input[type="radio"] {
+    margin-right: 8px;
+    cursor: pointer;
+    width: 18px;
+    height: 18px;
+}
+
+#serversTable input[type="radio"]:checked {
+    accent-color: #3498db;
+}
+
+#serversTable input[name="default_smtp"] {
+    accent-color: #2ecc71;
+}
+
+#serversTable input[name="select_smtp"] {
+    accent-color: #3498db;
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.getElementById('smtpForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const formData = new FormData(e.target);
+    const data = {
+        name: formData.get('name'),
+        host: formData.get('host'),
+        port: formData.get('port'),
+        username: formData.get('username'),
+        password: formData.get('password'),
+        use_ssl: formData.get('use_ssl') === 'on',
+        use_tls: formData.get('use_tls') === 'on',
+        max_per_hour: formData.get('max_per_hour') || 100,
+        imap_host: formData.get('imap_host') || '',
+        imap_port: formData.get('imap_port') || 993,
+        save_to_sent: formData.get('save_to_sent') === 'on',
+        set_as_default: document.getElementById('setAsDefault').checked
+    };
+    
+    // Validate
+    if (!data.name || !data.host || !data.port || !data.username || !data.password) {
+        showAlert('Please fill in all required fields!', 'error');
+        return;
+    }
+    
+    try {
+        const response = await axios.post('/api/smtp/add', data);
+        if (response.data.success) {
+            showAlert('SMTP server added successfully!', 'success');
+            clearForm();
+            setTimeout(() => {
+                refreshServers();
+            }, 500);
+        }
+    } catch (error) {
+        showAlert('Error adding SMTP: ' + (error.response?.data?.error || error.message), 'error');
+    }
+});
+
+async function testConnection() {
+    const form = document.getElementById('smtpForm');
+    const formData = new FormData(form);
+    const data = {
+        host: formData.get('host'),
+        port: formData.get('port'),
+        username: formData.get('username'),
+        password: formData.get('password'),
+        use_ssl: formData.get('use_ssl') === 'on',
+        use_tls: formData.get('use_tls') === 'on'
+    };
+    
+    if (!data.host || !data.port || !data.username || !data.password) {
+        showAlert('Please fill in all SMTP details before testing!', 'error');
+        return;
+    }
+    
+    try {
+        showAlert('Testing connection... This may take a few seconds.', 'info');
+        const response = await axios.post('/api/smtp/test', data, { timeout: 35000 });
+        if (response.data.success) {
+            showAlert('✓ Connection test successful!', 'success');
+        }
+    } catch (error) {
+        const errorMsg = error.response?.data?.error || error.message || 'Connection failed';
+        showAlert('✗ Connection test failed: ' + errorMsg, 'error');
+        console.error('Connection test error:', error);
+    }
+}
+
+function clearForm() {
+    document.getElementById('smtpForm').reset();
+    // Restore default values
+    document.querySelector('input[name="name"]').value = 'UABIOTECH SMTP';
+    document.querySelector('input[name="host"]').value = 'smtpout.secureserver.net';
+    document.querySelector('input[name="port"]').value = '465';
+    document.querySelector('input[name="username"]').value = 'info@uabiotech.in';
+    document.querySelector('input[name="password"]').value = 'Uabiotech*2309';
+    document.querySelector('input[name="use_ssl"]').checked = true;
+    document.querySelector('input[name="use_tls"]').checked = false;
+    document.querySelector('input[name="max_per_hour"]').value = '100';
+}
+
+async function deleteServer(serverId, serverName) {
+    if (!confirm(`Are you sure you want to delete SMTP server "${serverName}"?\n\nThis action cannot be undone.`)) {
+        return;
+    }
+    
+    try {
+        const response = await axios.delete(`/api/smtp/delete/${serverId}`);
+        if (response.data.success) {
+            showAlert('SMTP server deleted successfully!', 'success');
+            refreshServers();
+        }
+    } catch (error) {
+        showAlert('Error deleting server: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function toggleServerStatus(serverId, currentStatus) {
+    const newStatus = currentStatus === 1 ? 0 : 1;
+    
+    try {
+        const response = await axios.post(`/api/smtp/toggle/${serverId}`, { is_active: newStatus });
+        if (response.data.success) {
+            showAlert(`Server ${newStatus === 1 ? 'activated' : 'deactivated'} successfully!`, 'success');
+            refreshServers();
+        }
+    } catch (error) {
+        showAlert('Error updating server status: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function setDefaultSMTP(serverId) {
+    try {
+        const response = await axios.post(`/api/smtp/set-default/${serverId}`);
+        if (response.data.success) {
+            showAlert('Default SMTP server updated!', 'success');
+        }
+    } catch (error) {
+        showAlert('Error setting default SMTP: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function loadSMTPConfig(serverId) {
+    try {
+        const response = await axios.get(`/api/smtp/get/${serverId}`);
+        if (response.data.success) {
+            const server = response.data.server;
+            
+            // Load into form
+            document.querySelector('input[name="name"]').value = server.name || '';
+            document.querySelector('input[name="host"]').value = server.host || '';
+            document.querySelector('input[name="port"]').value = server.port || '';
+            document.querySelector('input[name="username"]').value = server.username || '';
+            document.querySelector('input[name="password"]').value = server.password || '';
+            document.querySelector('input[name="max_per_hour"]').value = server.max_per_hour || 100;
+            
+            // IMAP settings
+            document.querySelector('input[name="imap_host"]').value = server.imap_host || '';
+            document.querySelector('input[name="imap_port"]').value = server.imap_port || 993;
+            
+            // Set checkboxes
+            document.querySelector('input[name="use_ssl"]').checked = server.use_ssl == 1 || server.use_ssl === true;
+            document.querySelector('input[name="use_tls"]').checked = server.use_tls == 1 || server.use_tls === true;
+            document.querySelector('input[name="save_to_sent"]').checked = server.save_to_sent != 0 && server.save_to_sent !== false;
+            document.getElementById('setAsDefault').checked = server.is_default == 1 || server.is_default === true;
+            
+            showAlert(`SMTP configuration loaded: ${server.name}`, 'success');
+            
+            // Scroll to form
+            document.querySelector('.form-container').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    } catch (error) {
+        showAlert('Error loading SMTP config: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function refreshServers() {
+    try {
+        const response = await axios.get('/api/smtp/list');
+        const servers = response.data.servers || [];
+        const defaultServer = response.data.default_server_id;
+        const tbody = document.getElementById('serversTableBody');
+        
+        if (servers.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px; color: #7f8c8d;">No SMTP servers configured. Add one above.</td></tr>';
+            return;
+        }
+        
+        tbody.innerHTML = servers.map(server => `
+            <tr data-server-id="${server.id}">
+                <td>
+                    <input type="radio" name="default_smtp" value="${server.id}" 
+                           ${server.id === defaultServer ? 'checked' : ''}
+                           onchange="setDefaultSMTP(${server.id})" title="Set as default">
+                    <input type="radio" name="select_smtp" value="${server.id}" 
+                           onchange="loadSMTPConfig(${server.id})" style="margin-left: 15px;" title="Load for testing">
+                    ${server.name}
+                </td>
+                <td>${server.host}</td>
+                <td>${server.port}</td>
+                <td>${server.username}</td>
+                <td>
+                    <span class="status-badge ${server.is_active ? 'active' : 'inactive'}">
+                        ${server.is_active ? 'Active' : 'Inactive'}
+                    </span>
+                </td>
+                <td>
+                    <button class="btn btn-primary btn-sm" onclick="loadSMTPConfig(${server.id})" title="Load for testing">
+                        <i class="fas fa-edit"></i> Load
+                    </button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteServer(${server.id}, '${server.name.replace(/'/g, "\\'")}')">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                    <button class="btn btn-info btn-sm" onclick="toggleServerStatus(${server.id}, ${server.is_active ? 1 : 0})">
+                        <i class="fas fa-${server.is_active ? 'pause' : 'play'}"></i> ${server.is_active ? 'Deactivate' : 'Activate'}
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    } catch (error) {
+        showAlert('Error refreshing servers: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+</script>
+{% endblock %}
+

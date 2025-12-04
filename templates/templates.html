@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block title %}Templates - ANAGHA SOLUTION{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-file-alt"></i> Template Library</h1>
+</div>
+
+<div class="form-container">
+    <h2>Create New Template</h2>
+    <form id="templateForm">
+        <div class="form-group">
+            <label>Template Name *</label>
+            <input type="text" name="name" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Category *</label>
+            <select name="category" required>
+                <option value="Corporate">Corporate</option>
+                <option value="Promotional">Promotional</option>
+                <option value="Personal">Personal</option>
+                <option value="Newsletter">Newsletter</option>
+                <option value="Other">Other</option>
+            </select>
+        </div>
+        
+        <div class="form-group">
+            <label>HTML Content *</label>
+            <textarea name="html_content" required placeholder="Enter HTML content. Use merge tags: {name}, {email}, {company}, {city}"></textarea>
+        </div>
+        
+        <button type="submit" class="btn btn-success">
+            <i class="fas fa-save"></i> Save Template
+        </button>
+    </form>
+</div>
+
+<div class="table-container">
+    <h2>Saved Templates ({{ templates|length }} total)</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Category</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for template in templates %}
+            <tr>
+                <td>{{ template.name }}</td>
+                <td>{{ template.category }}</td>
+                <td>{{ template.created_at[:10] if template.created_at else '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.getElementById('templateForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const formData = new FormData(e.target);
+    const data = {
+        name: formData.get('name'),
+        category: formData.get('category'),
+        html_content: formData.get('html_content')
+    };
+    
+    try {
+        const response = await axios.post('/api/templates/save', data);
+        showAlert('Template saved successfully!', 'success');
+        setTimeout(() => {
+            window.location.reload();
+        }, 1500);
+    } catch (error) {
+        showAlert('Error saving template: ' + (error.response?.data?.error || error.message), 'error');
+    }
+});
+</script>
+{% endblock %}
+

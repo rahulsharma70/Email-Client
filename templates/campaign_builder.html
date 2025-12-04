@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+
+{% block title %}Campaign Builder - ANAGHA SOLUTION{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-envelope"></i> Create New Campaign</h1>
+</div>
+
+<div class="form-container">
+    <form id="campaignForm">
+        <div class="form-group">
+            <label>Campaign Name *</label>
+            <input type="text" name="name" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Subject Line *</label>
+            <input type="text" name="subject" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Sender Name *</label>
+            <input type="text" name="sender_name" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Sender Email *</label>
+            <input type="email" name="sender_email" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Load Template (Optional)</label>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <select id="templateSelect" style="flex: 1; padding: 10px;">
+                    <option value="">-- Select a template --</option>
+                    {% for template in templates %}
+                    <option value="{{ template.id }}" data-content="{{ template.html_content|e }}">{{ template.name }} ({{ template.category }})</option>
+                    {% endfor %}
+                </select>
+                <button type="button" class="btn btn-primary" onclick="loadSelectedTemplate()">
+                    <i class="fas fa-file-import"></i> Load Template
+                </button>
+            </div>
+        </div>
+        
+        <div class="form-group">
+            <label>Message Type *</label>
+            <select name="message_type" id="messageType" required onchange="toggleMessageEditor()">
+                <option value="text">Plain Text</option>
+                <option value="html">HTML</option>
+            </select>
+        </div>
+        
+        <div class="form-group" id="textContentGroup">
+            <label>Message Content (Text) *</label>
+            <textarea name="text_content" id="textContent" rows="10" placeholder="Enter your message text here. Use merge tags: {name}, {email}, {company}, {city}"></textarea>
+        </div>
+        
+        <div class="form-group" id="htmlContentGroup" style="display: none;">
+            <label>HTML Content *</label>
+            <textarea name="html_content" id="htmlContent" rows="10" placeholder="Enter HTML content or use merge tags: {name}, {email}, {company}, {city}"></textarea>
+        </div>
+        
+        <div class="form-group">
+            <label>Attachments</label>
+            <input type="file" name="attachments" id="attachments" multiple accept=".pdf,.txt,.doc,.docx,.jpg,.jpeg,.png,.mp3,.mp4">
+            <small style="color: #7f8c8d; display: block; margin-top: 5px;">
+                Supported formats: PDF, TXT, Word (DOC/DOCX), JPEG, PNG, MP3, MP4
+            </small>
+            <div id="attachmentList" style="margin-top: 10px;"></div>
+        </div>
+        
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="send_now" id="sendNowCheckbox" checked> Send immediately after creating
+            </label>
+            <small style="color: #7f8c8d; display: block; margin-top: 5px;">
+                ✓ Check this box to send emails immediately. Uncheck to save as draft.
+            </small>
+        </div>
+        
+        <button type="submit" class="btn btn-success">
+            <i class="fas fa-paper-plane"></i> Create & Send Campaign
+        </button>
+        <button type="button" class="btn btn-secondary" onclick="saveDraft()">
+            <i class="fas fa-save"></i> Save as Draft
+        </button>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Load templates on page load
+let templatesData = {};
+{% for template in templates %}
+templatesData[{{ template.id }}] = {{ template.html_content|tojson }};
+{% endfor %}
+
+function loadSelectedTemplate() {
+    const templateSelect = document.getElementById('templateSelect');
+    const templateId = templateSelect.value;
+    
+    if (!templateId) {
+        showAlert('Please select a template first!', 'error');
+        return;
+    }
+    
+    const templateContent = templatesData[templateId];
+    if (!templateContent) {
+        showAlert('Template content not found!', 'error');
+        return;
+    }
+    
+    // Switch to HTML mode if not already
+    document.getElementById('messageType').value = 'html';
+    toggleMessageEditor();
+    
+    // Load template content into HTML editor
+    document.getElementById('htmlContent').value = templateContent;
+    
+    showAlert('Template loaded successfully!', 'success');
+}
+
+function toggleMessageEditor() {
+    const messageType = document.getElementById('messageType').value;
+    const textGroup = document.getElementById('textContentGroup');
+    const htmlGroup = document.getElementById('htmlContentGroup');
+    const textContent = document.getElementById('textContent');
+    const htmlContent = document.getElementById('htmlContent');
+    
+    if (messageType === 'text') {
+        textGroup.style.display = 'block';
+        htmlGroup.style.display = 'none';
+        textContent.required = true;
+        htmlContent.required = false;
+    } else {
+        textGroup.style.display = 'none';
+        htmlGroup.style.display = 'block';
+        textContent.required = false;
+        htmlContent.required = true;
+    }
+}
+
+// Handle file attachments display
+document.getElementById('attachments').addEventListener('change', function(e) {
+    const files = e.target.files;
+    const attachmentList = document.getElementById('attachmentList');
+    attachmentList.innerHTML = '';
+    
+    if (files.length > 0) {
+        const list = document.createElement('ul');
+        list.style.listStyle = 'none';
+        list.style.padding = '0';
+        
+        for (let i = 0; i < files.length; i++) {
+            const li = document.createElement('li');
+            li.style.padding = '5px';
+            li.style.background = '#ecf0f1';
+            li.style.marginBottom = '5px';
+            li.style.borderRadius = '3px';
+            li.innerHTML = `<i class="fas fa-paperclip"></i> ${files[i].name} (${(files[i].size / 1024).toFixed(2)} KB)`;
+            list.appendChild(li);
+        }
+        
+        attachmentList.appendChild(list);
+    }
+});
+
+document.getElementById('campaignForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const formData = new FormData(e.target);
+    const messageType = formData.get('message_type') || 'text';
+    
+    // Create FormData for file upload (axios will set Content-Type automatically)
+    const uploadFormData = new FormData();
+    
+    // Add all form fields
+    uploadFormData.append('name', formData.get('name'));
+    uploadFormData.append('subject', formData.get('subject'));
+    uploadFormData.append('sender_name', formData.get('sender_name'));
+    uploadFormData.append('sender_email', formData.get('sender_email'));
+    uploadFormData.append('message_type', messageType);
+    
+    if (messageType === 'text') {
+        uploadFormData.append('text_content', formData.get('text_content') || '');
+    } else {
+        uploadFormData.append('html_content', formData.get('html_content') || '');
+    }
+    
+    // Get send_now checkbox value
+    const sendNow = document.getElementById('sendNowCheckbox').checked;
+    uploadFormData.append('send_now', sendNow ? 'on' : '');
+    
+    // Add attachments
+    const attachments = formData.getAll('attachments');
+    attachments.forEach(file => {
+        if (file instanceof File) {
+            uploadFormData.append('attachments', file);
+        }
+    });
+    
+    try {
+        const response = await axios.post('/api/campaign/create', uploadFormData, {
+            headers: {
+                'Content-Type': 'multipart/form-data'
+            }
+        });
+        
+        if (response.data.success) {
+            showAlert('Campaign created successfully!', 'success');
+            if (formData.get('send_now') === 'on') {
+                showAlert('Emails are being sent in the background.', 'info');
+            }
+            e.target.reset();
+            document.getElementById('attachmentList').innerHTML = '';
+            document.getElementById('messageType').value = 'text';
+            toggleMessageEditor();
+        }
+    } catch (error) {
+        const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
+        showAlert('Error creating campaign: ' + errorMsg, 'error');
+        console.error('Campaign creation error:', error);
+    }
+});
+
+function saveDraft() {
+    const form = document.getElementById('campaignForm');
+    const formData = new FormData(form);
+    const messageType = formData.get('message_type') || 'text';
+    
+    const uploadFormData = new FormData();
+    uploadFormData.append('name', formData.get('name'));
+    uploadFormData.append('subject', formData.get('subject'));
+    uploadFormData.append('sender_name', formData.get('sender_name'));
+    uploadFormData.append('sender_email', formData.get('sender_email'));
+    uploadFormData.append('message_type', messageType);
+    
+    if (messageType === 'text') {
+        uploadFormData.append('text_content', formData.get('text_content') || '');
+    } else {
+        uploadFormData.append('html_content', formData.get('html_content') || '');
+    }
+    
+    const sendNow = document.getElementById('sendNowCheckbox').checked;
+    uploadFormData.append('send_now', sendNow ? 'on' : '');
+    
+    // Add attachments
+    const attachments = formData.getAll('attachments');
+    attachments.forEach(file => {
+        if (file instanceof File) {
+            uploadFormData.append('attachments', file);
+        }
+    });
+    
+    axios.post('/api/campaign/create', uploadFormData, {
+        headers: {
+            'Content-Type': 'multipart/form-data'
+        }
+    })
+        .then((response) => {
+            if (response.data.success) {
+                showAlert('Campaign saved as draft!', 'success');
+            }
+        })
+        .catch(error => {
+            const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
+            showAlert('Error saving draft: ' + errorMsg, 'error');
+            console.error('Draft save error:', error);
+        });
+}
+</script>
+{% endblock %}
+

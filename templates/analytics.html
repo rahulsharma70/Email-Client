@@ -1,0 +1,352 @@
+{% extends "base.html" %}
+
+{% block title %}Analytics - ANAGHA SOLUTION{% endblock %}
+
+{% block extra_css %}
+<style>
+.btn-sm {
+    padding: 5px 10px;
+    font-size: 12px;
+}
+
+.btn-warning {
+    background: #f39c12;
+    color: white;
+}
+
+.btn-warning:hover {
+    background: #e67e22;
+}
+
+.btn-success {
+    background: #27ae60;
+    color: white;
+}
+
+.btn-success:hover {
+    background: #229954;
+}
+
+.status-badge {
+    padding: 4px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: bold;
+}
+
+.status-badge.sent {
+    background: #2ecc71;
+    color: white;
+}
+
+.status-badge.draft {
+    background: #95a5a6;
+    color: white;
+}
+
+.status-badge.sending {
+    background: #3498db;
+    color: white;
+}
+
+#campaignsTable input[type="checkbox"] {
+    cursor: pointer;
+    width: 18px;
+    height: 18px;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-chart-bar"></i> Analytics & Tracking</h1>
+</div>
+
+<div class="table-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+        <h2 style="margin: 0;">Campaign Performance</h2>
+        <div>
+            <button class="btn btn-success" onclick="sendSelectedCampaigns()" id="sendCampaignsBtn" style="display: none;">
+                <i class="fas fa-paper-plane"></i> Send Selected
+            </button>
+            <button class="btn btn-danger" onclick="deleteSelectedCampaigns()" id="deleteCampaignsBtn" style="display: none;">
+                <i class="fas fa-trash"></i> Delete Selected
+            </button>
+            <button class="btn btn-warning" onclick="deleteDraftCampaigns()">
+                <i class="fas fa-trash-alt"></i> Delete All Drafts
+            </button>
+            <button class="btn btn-primary" onclick="refreshCampaigns()" style="margin-left: 10px;">
+                <i class="fas fa-sync"></i> Refresh
+            </button>
+        </div>
+    </div>
+    <table id="campaignsTable">
+        <thead>
+            <tr>
+                <th style="width: 30px;">
+                    <input type="checkbox" id="selectAllCampaigns" onchange="toggleSelectAllCampaigns()">
+                </th>
+                <th>Campaign Name</th>
+                <th>Subject</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="campaignsTableBody">
+            {% for campaign in campaigns %}
+            <tr data-campaign-id="{{ campaign.id }}" data-campaign-status="{{ campaign.status }}">
+                <td>
+                    <input type="checkbox" class="campaign-checkbox" value="{{ campaign.id }}" onchange="updateDeleteButton()">
+                </td>
+                <td>{{ campaign.name }}</td>
+                <td>{{ campaign.subject }}</td>
+                <td>
+                    <span class="status-badge {{ 'sent' if campaign.status == 'sent' else 'draft' if campaign.status == 'draft' else 'sending' }}">
+                        {{ campaign.status }}
+                    </span>
+                </td>
+                <td>{{ campaign.created_at[:10] if campaign.created_at else '-' }}</td>
+                <td>
+                    {% if campaign.status == 'draft' %}
+                    <button class="btn btn-success btn-sm" onclick="sendCampaign({{ campaign.id }}, '{{ campaign.name }}')" style="margin-right: 5px;">
+                        <i class="fas fa-paper-plane"></i> Send
+                    </button>
+                    {% endif %}
+                    <button class="btn btn-danger btn-sm" onclick="deleteCampaign({{ campaign.id }}, '{{ campaign.name }}')">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+            {% if not campaigns %}
+            <tr>
+                <td colspan="6" style="text-align: center; padding: 20px; color: #7f8c8d;">
+                    No campaigns found.
+                </td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function toggleSelectAllCampaigns() {
+    const selectAll = document.getElementById('selectAllCampaigns');
+    const checkboxes = document.querySelectorAll('.campaign-checkbox');
+    checkboxes.forEach(cb => {
+        cb.checked = selectAll.checked;
+    });
+    updateDeleteButton();
+}
+
+function updateDeleteButton() {
+    const checked = document.querySelectorAll('.campaign-checkbox:checked');
+    const deleteBtn = document.getElementById('deleteCampaignsBtn');
+    const sendBtn = document.getElementById('sendCampaignsBtn');
+    
+    if (checked.length > 0) {
+        deleteBtn.style.display = 'inline-block';
+        deleteBtn.innerHTML = `<i class="fas fa-trash"></i> Delete Selected (${checked.length})`;
+        
+        // Check if any selected campaigns are drafts
+        const checkedRows = Array.from(checked).map(cb => {
+            const row = cb.closest('tr');
+            return {
+                id: parseInt(cb.value),
+                status: row.getAttribute('data-campaign-status')
+            };
+        });
+        
+        const hasDrafts = checkedRows.some(c => c.status === 'draft');
+        if (hasDrafts) {
+            const draftCount = checkedRows.filter(c => c.status === 'draft').length;
+            sendBtn.style.display = 'inline-block';
+            sendBtn.innerHTML = `<i class="fas fa-paper-plane"></i> Send Selected Drafts (${draftCount})`;
+        } else {
+            sendBtn.style.display = 'none';
+        }
+    } else {
+        deleteBtn.style.display = 'none';
+        sendBtn.style.display = 'none';
+    }
+}
+
+async function sendCampaign(campaignId, campaignName) {
+    if (!confirm(`Are you sure you want to send campaign "${campaignName}"?\n\nThis will queue emails for all recipients in this campaign.`)) {
+        return;
+    }
+    
+    try {
+        showAlert('Sending campaign...', 'info');
+        const response = await axios.post(`/api/campaigns/send/${campaignId}`);
+        if (response.data.success) {
+            showAlert('Campaign queued for sending successfully!', 'success');
+            refreshCampaigns();
+        }
+    } catch (error) {
+        showAlert('Error sending campaign: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function deleteCampaign(campaignId, campaignName) {
+    if (!confirm(`Are you sure you want to delete campaign "${campaignName}"?\n\nThis will also delete all associated queue items and tracking data.\n\nThis action cannot be undone.`)) {
+        return;
+    }
+    
+    try {
+        const response = await axios.delete(`/api/campaigns/delete/${campaignId}`);
+        if (response.data.success) {
+            showAlert('Campaign deleted successfully!', 'success');
+            refreshCampaigns();
+        }
+    } catch (error) {
+        showAlert('Error deleting campaign: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function deleteSelectedCampaigns() {
+    const checked = document.querySelectorAll('.campaign-checkbox:checked');
+    if (checked.length === 0) {
+        showAlert('Please select campaigns to delete!', 'error');
+        return;
+    }
+    
+    if (!confirm(`Are you sure you want to delete ${checked.length} campaign(s)?\n\nThis will also delete all associated queue items and tracking data.\n\nThis action cannot be undone.`)) {
+        return;
+    }
+    
+    const campaignIds = Array.from(checked).map(cb => parseInt(cb.value));
+    
+    try {
+        const response = await axios.post('/api/campaigns/delete/bulk', { campaign_ids: campaignIds });
+        if (response.data.success) {
+            showAlert(`Successfully deleted ${response.data.deleted_count} campaign(s)!`, 'success');
+            refreshCampaigns();
+        }
+    } catch (error) {
+        showAlert('Error deleting campaigns: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+function deleteDraftCampaigns() {
+    if (!confirm('⚠️ WARNING: Are you sure you want to delete ALL draft campaigns?\n\nThis will permanently delete all campaigns with "draft" status.\n\nThis action CANNOT be undone!')) {
+        return;
+    }
+    
+    if (!confirm('This is your last chance. Click OK to confirm deletion of ALL draft campaigns.')) {
+        return;
+    }
+    
+    deleteAllDraftCampaigns();
+}
+
+async function deleteAllDraftCampaigns() {
+    try {
+        const response = await axios.delete('/api/campaigns/delete/drafts');
+        if (response.data.success) {
+            showAlert(`Successfully deleted ${response.data.deleted_count} draft campaign(s)!`, 'success');
+            refreshCampaigns();
+        }
+    } catch (error) {
+        showAlert('Error deleting draft campaigns: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function sendSelectedCampaigns() {
+    const checked = document.querySelectorAll('.campaign-checkbox:checked');
+    if (checked.length === 0) {
+        showAlert('Please select campaigns to send!', 'error');
+        return;
+    }
+    
+    // Get only draft campaigns
+    const draftCampaigns = Array.from(checked)
+        .map(cb => {
+            const row = cb.closest('tr');
+            return {
+                id: parseInt(cb.value),
+                name: row.querySelector('td:nth-child(2)').textContent.trim(),
+                status: row.getAttribute('data-campaign-status')
+            };
+        })
+        .filter(c => c.status === 'draft');
+    
+    if (draftCampaigns.length === 0) {
+        showAlert('No draft campaigns selected! Only draft campaigns can be sent.', 'error');
+        return;
+    }
+    
+    if (!confirm(`Are you sure you want to send ${draftCampaigns.length} draft campaign(s)?\n\nThis will queue emails for all recipients in these campaigns.`)) {
+        return;
+    }
+    
+    const campaignIds = draftCampaigns.map(c => c.id);
+    
+    try {
+        showAlert('Sending campaigns...', 'info');
+        const response = await axios.post('/api/campaigns/send/bulk', { campaign_ids: campaignIds });
+        if (response.data.success) {
+            showAlert(`Successfully queued ${response.data.sent_count} campaign(s) for sending!`, 'success');
+            refreshCampaigns();
+        }
+    } catch (error) {
+        showAlert('Error sending campaigns: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function refreshCampaigns() {
+    try {
+        const response = await axios.get('/api/campaigns');
+        const campaigns = response.data.campaigns || [];
+        const tbody = document.getElementById('campaignsTableBody');
+        
+        if (campaigns.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px; color: #7f8c8d;">No campaigns found.</td></tr>';
+            return;
+        }
+        
+        tbody.innerHTML = campaigns.map(campaign => {
+            const statusClass = campaign.status === 'sent' ? 'sent' : 
+                               campaign.status === 'draft' ? 'draft' : 'sending';
+            const createdDate = campaign.created_at ? campaign.created_at.substring(0, 10) : '-';
+            
+            return `
+            <tr data-campaign-id="${campaign.id}" data-campaign-status="${campaign.status}">
+                <td>
+                    <input type="checkbox" class="campaign-checkbox" value="${campaign.id}" onchange="updateDeleteButton()">
+                </td>
+                <td>${campaign.name}</td>
+                <td>${campaign.subject}</td>
+                <td>
+                    <span class="status-badge ${statusClass}">
+                        ${campaign.status}
+                    </span>
+                </td>
+                <td>${createdDate}</td>
+                <td>
+                    ${campaign.status === 'draft' ? `
+                    <button class="btn btn-success btn-sm" onclick="sendCampaign(${campaign.id}, '${campaign.name.replace(/'/g, "\\'")}')" style="margin-right: 5px;">
+                        <i class="fas fa-paper-plane"></i> Send
+                    </button>
+                    ` : ''}
+                    <button class="btn btn-danger btn-sm" onclick="deleteCampaign(${campaign.id}, '${campaign.name.replace(/'/g, "\\'")}')">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                </td>
+            </tr>
+            `;
+        }).join('');
+        
+        // Reset select all checkbox
+        document.getElementById('selectAllCampaigns').checked = false;
+        updateDeleteButton();
+    } catch (error) {
+        showAlert('Error refreshing campaigns: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+</script>
+{% endblock %}
+

@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+
+{% block title %}Recipients - ANAGHA SOLUTION{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-users"></i> Recipient Management</h1>
+</div>
+
+<div class="form-container">
+    <h2>Import Recipients</h2>
+    <form id="importForm" enctype="multipart/form-data">
+        <div class="form-group">
+            <label>Upload CSV/Excel File</label>
+            <input type="file" name="file" accept=".csv,.xlsx,.xls" required>
+        </div>
+        <button type="submit" class="btn btn-primary">
+            <i class="fas fa-upload"></i> Import Recipients
+        </button>
+    </form>
+</div>
+
+<div class="table-container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+        <h2 style="margin: 0;">Recipients List (<span id="recipientCount">{{ recipients|length }}</span> total)</h2>
+        <div>
+            <button class="btn btn-danger" onclick="deleteSelectedRecipients()" id="deleteSelectedBtn" style="display: none;">
+                <i class="fas fa-trash"></i> Delete Selected
+            </button>
+            <button class="btn btn-warning" onclick="confirmDeleteAll()" style="margin-left: 10px;">
+                <i class="fas fa-trash-alt"></i> Delete All
+            </button>
+            <button class="btn btn-primary" onclick="refreshRecipients()" style="margin-left: 10px;">
+                <i class="fas fa-sync"></i> Refresh
+            </button>
+        </div>
+    </div>
+    <table id="recipientsTable">
+        <thead>
+            <tr>
+                <th style="width: 30px;">
+                    <input type="checkbox" id="selectAll" onchange="toggleSelectAll()">
+                </th>
+                <th>Email</th>
+                <th>First Name</th>
+                <th>Last Name</th>
+                <th>Company</th>
+                <th>City</th>
+                <th>List</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="recipientsTableBody">
+            {% for recipient in recipients %}
+            <tr data-recipient-id="{{ recipient.id }}">
+                <td>
+                    <input type="checkbox" class="recipient-checkbox" value="{{ recipient.id }}" onchange="updateDeleteButton()">
+                </td>
+                <td>{{ recipient.email }}</td>
+                <td>{{ recipient.first_name or '-' }}</td>
+                <td>{{ recipient.last_name or '-' }}</td>
+                <td>{{ recipient.company or '-' }}</td>
+                <td>{{ recipient.city or '-' }}</td>
+                <td>{{ recipient.list_name or 'default' }}</td>
+                <td>
+                    <button class="btn btn-danger btn-sm" onclick="deleteRecipient({{ recipient.id }}, '{{ recipient.email }}')">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+            {% if not recipients %}
+            <tr>
+                <td colspan="8" style="text-align: center; padding: 20px; color: #7f8c8d;">
+                    No recipients found. Import recipients using the form above.
+                </td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.btn-sm {
+    padding: 5px 10px;
+    font-size: 12px;
+}
+
+.btn-warning {
+    background: #f39c12;
+    color: white;
+}
+
+.btn-warning:hover {
+    background: #e67e22;
+}
+
+#recipientsTable input[type="checkbox"] {
+    cursor: pointer;
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.getElementById('importForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const formData = new FormData(e.target);
+    
+    try {
+        const response = await axios.post('/api/recipients/import', formData, {
+            headers: {
+                'Content-Type': 'multipart/form-data'
+            }
+        });
+        
+        showAlert(`Successfully imported ${response.data.count} recipients!`, 'success');
+        setTimeout(() => {
+            refreshRecipients();
+        }, 1500);
+    } catch (error) {
+        showAlert('Error importing: ' + (error.response?.data?.error || error.message), 'error');
+    }
+});
+
+function toggleSelectAll() {
+    const selectAll = document.getElementById('selectAll');
+    const checkboxes = document.querySelectorAll('.recipient-checkbox');
+    checkboxes.forEach(cb => {
+        cb.checked = selectAll.checked;
+    });
+    updateDeleteButton();
+}
+
+function updateDeleteButton() {
+    const checked = document.querySelectorAll('.recipient-checkbox:checked');
+    const deleteBtn = document.getElementById('deleteSelectedBtn');
+    if (checked.length > 0) {
+        deleteBtn.style.display = 'inline-block';
+        deleteBtn.innerHTML = `<i class="fas fa-trash"></i> Delete Selected (${checked.length})`;
+    } else {
+        deleteBtn.style.display = 'none';
+    }
+}
+
+async function deleteRecipient(recipientId, email) {
+    if (!confirm(`Are you sure you want to delete recipient "${email}"?\n\nThis action cannot be undone.`)) {
+        return;
+    }
+    
+    try {
+        const response = await axios.delete(`/api/recipients/delete/${recipientId}`);
+        if (response.data.success) {
+            showAlert('Recipient deleted successfully!', 'success');
+            refreshRecipients();
+        }
+    } catch (error) {
+        showAlert('Error deleting recipient: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function deleteSelectedRecipients() {
+    const checked = document.querySelectorAll('.recipient-checkbox:checked');
+    if (checked.length === 0) {
+        showAlert('Please select recipients to delete!', 'error');
+        return;
+    }
+    
+    if (!confirm(`Are you sure you want to delete ${checked.length} recipient(s)?\n\nThis action cannot be undone.`)) {
+        return;
+    }
+    
+    const recipientIds = Array.from(checked).map(cb => parseInt(cb.value));
+    
+    try {
+        const response = await axios.post('/api/recipients/delete/bulk', { recipient_ids: recipientIds });
+        if (response.data.success) {
+            showAlert(`Successfully deleted ${response.data.deleted_count} recipient(s)!`, 'success');
+            refreshRecipients();
+        }
+    } catch (error) {
+        showAlert('Error deleting recipients: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+function confirmDeleteAll() {
+    if (!confirm('⚠️ WARNING: Are you sure you want to delete ALL recipients?\n\nThis will permanently delete all recipients from the database.\n\nThis action CANNOT be undone!')) {
+        return;
+    }
+    
+    if (!confirm('This is your last chance. Click OK to confirm deletion of ALL recipients.')) {
+        return;
+    }
+    
+    deleteAllRecipients();
+}
+
+async function deleteAllRecipients() {
+    try {
+        const response = await axios.delete('/api/recipients/delete/all');
+        if (response.data.success) {
+            showAlert(`Successfully deleted all recipients!`, 'success');
+            refreshRecipients();
+        }
+    } catch (error) {
+        showAlert('Error deleting all recipients: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function refreshRecipients() {
+    try {
+        const response = await axios.get('/api/recipients/list');
+        const recipients = response.data.recipients || [];
+        const tbody = document.getElementById('recipientsTableBody');
+        const countSpan = document.getElementById('recipientCount');
+        
+        countSpan.textContent = recipients.length;
+        
+        if (recipients.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 20px; color: #7f8c8d;">No recipients found. Import recipients using the form above.</td></tr>';
+            return;
+        }
+        
+        tbody.innerHTML = recipients.map(recipient => `
+            <tr data-recipient-id="${recipient.id}">
+                <td>
+                    <input type="checkbox" class="recipient-checkbox" value="${recipient.id}" onchange="updateDeleteButton()">
+                </td>
+                <td>${recipient.email}</td>
+                <td>${recipient.first_name || '-'}</td>
+                <td>${recipient.last_name || '-'}</td>
+                <td>${recipient.company || '-'}</td>
+                <td>${recipient.city || '-'}</td>
+                <td>${recipient.list_name || 'default'}</td>
+                <td>
+                    <button class="btn btn-danger btn-sm" onclick="deleteRecipient(${recipient.id}, '${recipient.email.replace(/'/g, "\\'")}')">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+        
+        // Reset select all checkbox
+        document.getElementById('selectAll').checked = false;
+        updateDeleteButton();
+    } catch (error) {
+        showAlert('Error refreshing recipients: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+</script>
+{% endblock %}
+
