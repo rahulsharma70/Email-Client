@@ -1,33 +1,39 @@
+# Environment variables
+.env
+
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-venv/
 env/
+venv/
 ENV/
+build/
+dist/
+*.egg-info/
 
 # Database
 *.db
 *.sqlite
 *.sqlite3
 
-# Build files
-build/
-dist/
-*.spec
+# Logs
+logs/
+*.log
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
-
+# Temporary files
+temp/
+*.tmp

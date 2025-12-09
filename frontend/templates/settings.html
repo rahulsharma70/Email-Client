@@ -343,6 +343,76 @@
         <div id="deploymentStatus" style="margin-top: 10px;"></div>
     </div>
     
+    <!-- Stripe Billing Configuration -->
+    <div class="form-container" style="margin: 0;">
+        <h2 style="display: flex; align-items: center; gap: 10px; margin-bottom: 20px;">
+            <i class="fas fa-credit-card" style="color: #635bff;"></i> Stripe Billing
+        </h2>
+        <form id="stripeForm">
+            <div class="form-group">
+                <label>Stripe Secret Key</label>
+                <input type="password" name="stripe_secret_key" id="stripeSecretKey" 
+                       placeholder="sk_test_..." 
+                       style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <small style="color: #7f8c8d;">Your Stripe secret key for payment processing</small>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="togglePasswordVisibility('stripeSecretKey')" 
+                        style="margin-top: 5px;">
+                    <i class="fas fa-eye"></i> Show/Hide
+                </button>
+            </div>
+            
+            <div class="form-group">
+                <label>Stripe Publishable Key</label>
+                <input type="text" name="stripe_publishable_key" id="stripePublishableKey" 
+                       placeholder="pk_test_..." 
+                       style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <small style="color: #7f8c8d;">Your Stripe publishable key (for frontend)</small>
+            </div>
+            
+            <div class="form-group">
+                <button type="button" class="btn btn-info" onclick="getSubscriptionInfo()" style="width: 100%;">
+                    <i class="fas fa-info-circle"></i> View Subscription Info
+                </button>
+            </div>
+            
+            <button type="submit" class="btn btn-success" style="width: 100%;">
+                <i class="fas fa-save"></i> Save Stripe Configuration
+            </button>
+        </form>
+        <div id="stripeStatus" style="margin-top: 10px;"></div>
+        <div id="subscriptionInfo" style="margin-top: 15px; padding: 15px; background: #f8f9fa; border-radius: 5px; display: none;">
+            <h4 style="margin: 0 0 10px 0; font-size: 14px;">Current Subscription</h4>
+            <div id="subscriptionDetails" style="font-size: 12px;"></div>
+        </div>
+    </div>
+    
+    <!-- Redis Configuration -->
+    <div class="form-container" style="margin: 0;">
+        <h2 style="display: flex; align-items: center; gap: 10px; margin-bottom: 20px;">
+            <i class="fas fa-database" style="color: #dc382d;"></i> Redis Configuration
+        </h2>
+        <form id="redisForm">
+            <div class="form-group">
+                <label>Redis URL</label>
+                <input type="text" name="redis_url" id="redisUrl" 
+                       placeholder="redis://localhost:6379/0 or redis://user:pass@host:port/db" 
+                       style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <small style="color: #7f8c8d;">Redis connection URL for Celery background workers</small>
+            </div>
+            
+            <div class="form-group">
+                <button type="button" class="btn btn-info" onclick="testRedisConnection()" style="width: 100%;">
+                    <i class="fas fa-plug"></i> Test Redis Connection
+                </button>
+            </div>
+            
+            <button type="submit" class="btn btn-success" style="width: 100%;">
+                <i class="fas fa-save"></i> Save Redis Configuration
+            </button>
+        </form>
+        <div id="redisStatus" style="margin-top: 10px;"></div>
+    </div>
+    
     <!-- Database Connection Status -->
     <div class="form-container" style="margin: 0;">
         <h2 style="display: flex; align-items: center; gap: 10px; margin-bottom: 20px;">
@@ -405,6 +475,8 @@ document.addEventListener('DOMContentLoaded', function() {
     loadSenderStatus();
     loadDatabaseConfig();
     loadDeploymentConfig();
+    loadStripeConfig();
+    loadRedisConfig();
     checkDatabaseConnection();
     
     // Auto-refresh queue stats every 5 seconds
@@ -879,5 +951,122 @@ document.getElementById('deploymentForm').addEventListener('submit', async funct
         showAlert('Error: ' + (error.response?.data?.error || error.message), 'error');
     }
 });
+
+// Stripe Configuration Functions
+async function loadStripeConfig() {
+    try {
+        const response = await axios.get('/api/settings/stripe');
+        if (response.data.success) {
+            const config = response.data.config;
+            if (config.stripe_secret_key) {
+                document.getElementById('stripeSecretKey').value = config.stripe_secret_key;
+            }
+            if (config.stripe_publishable_key) {
+                document.getElementById('stripePublishableKey').value = config.stripe_publishable_key;
+            }
+        }
+    } catch (error) {
+        console.error('Error loading Stripe config:', error);
+    }
+}
+
+document.getElementById('stripeForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const formData = {
+        stripe_secret_key: document.getElementById('stripeSecretKey').value,
+        stripe_publishable_key: document.getElementById('stripePublishableKey').value
+    };
+    
+    try {
+        const response = await axios.post('/api/settings/stripe', formData);
+        if (response.data.success) {
+            showAlert('Stripe configuration saved successfully!', 'success');
+        } else {
+            showAlert('Error: ' + (response.data.error || 'Failed to save'), 'error');
+        }
+    } catch (error) {
+        showAlert('Error: ' + (error.response?.data?.error || error.message), 'error');
+    }
+});
+
+async function getSubscriptionInfo() {
+    try {
+        const response = await axios.get('/api/settings/subscription-info');
+        if (response.data.success) {
+            const subscription = response.data.subscription;
+            const infoDiv = document.getElementById('subscriptionInfo');
+            const detailsDiv = document.getElementById('subscriptionDetails');
+            
+            infoDiv.style.display = 'block';
+            detailsDiv.innerHTML = `
+                <div><strong>Plan:</strong> ${subscription.plan_name || subscription.plan}</div>
+                <div><strong>Status:</strong> ${subscription.status}</div>
+                <div><strong>Emails/Month:</strong> ${subscription.emails_per_month || 'Unlimited'}</div>
+                <div><strong>Features:</strong> ${subscription.features?.join(', ') || 'None'}</div>
+            `;
+        } else {
+            showAlert('No active subscription found', 'info');
+        }
+    } catch (error) {
+        if (error.response?.status === 401) {
+            showAlert('Please login to view subscription info', 'error');
+        } else {
+            showAlert('Error: ' + (error.response?.data?.error || error.message), 'error');
+        }
+    }
+}
+
+// Redis Configuration Functions
+async function loadRedisConfig() {
+    try {
+        const response = await axios.get('/api/settings/redis');
+        if (response.data.success) {
+            const config = response.data.config;
+            if (config.redis_url) {
+                document.getElementById('redisUrl').value = config.redis_url;
+            }
+        }
+    } catch (error) {
+        console.error('Error loading Redis config:', error);
+    }
+}
+
+document.getElementById('redisForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const formData = {
+        redis_url: document.getElementById('redisUrl').value
+    };
+    
+    try {
+        const response = await axios.post('/api/settings/redis', formData);
+        if (response.data.success) {
+            showAlert('Redis configuration saved successfully!', 'success');
+        } else {
+            showAlert('Error: ' + (response.data.error || 'Failed to save'), 'error');
+        }
+    } catch (error) {
+        showAlert('Error: ' + (error.response?.data?.error || error.message), 'error');
+    }
+});
+
+async function testRedisConnection() {
+    const redisUrl = document.getElementById('redisUrl').value;
+    
+    if (!redisUrl) {
+        showAlert('Please enter Redis URL', 'error');
+        return;
+    }
+    
+    try {
+        const response = await axios.post('/api/settings/test-redis', { redis_url: redisUrl });
+        if (response.data.success) {
+            showAlert('✓ Redis connection successful!', 'success');
+        } else {
+            showAlert('✗ Connection failed: ' + (response.data.error || 'Unknown error'), 'error');
+        }
+    } catch (error) {
+        showAlert('✗ Connection failed: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
 </script>
 {% endblock %}

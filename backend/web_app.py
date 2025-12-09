@@ -8,8 +8,9 @@ from flask_cors import CORS
 import os
 import sys
 
-# Add current directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add backend directory to path
+backend_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, backend_dir)
 
 from database.db_manager import DatabaseManager
 from core.email_sender import EmailSender
@@ -22,14 +23,16 @@ import pandas as pd
 from datetime import datetime
 import json
 
+# Get paths relative to backend directory
+backend_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(backend_dir)
+frontend_dir = os.path.join(project_root, 'frontend')
+
 app = Flask(__name__, 
-            template_folder='templates',
-            static_folder='static')
-# Use environment variable for secret key, fallback to generated key for development
-app.secret_key = os.getenv('FLASK_SECRET_KEY') or os.urandom(32).hex()
-# Restrict CORS to specific origins in production
-allowed_origins = os.getenv('CORS_ORIGINS', '*').split(',')
-CORS(app, resources={r"/*": {"origins": allowed_origins}})
+            template_folder=os.path.join(frontend_dir, 'templates'),
+            static_folder=os.path.join(frontend_dir, 'static'))
+app.secret_key = 'anagha_solution_secret_key_2024'
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Disable strict slashes to avoid 403 errors
 app.url_map.strict_slashes = False
@@ -47,11 +50,31 @@ def not_found(error):
 def internal_error(error):
     return jsonify({'error': 'Internal server error'}), 500
 
-# Initialize database
-db = DatabaseManager()
-db.initialize_database()
+# Initialize database - check if Supabase is configured
+database_type = os.getenv('DATABASE_TYPE', 'sqlite').lower()
+if database_type == 'supabase':
+    try:
+        from database.supabase_manager import SupabaseDatabaseManager
+        supabase_url = os.getenv('SUPABASE_URL')
+        supabase_key = os.getenv('SUPABASE_KEY')
+        if supabase_url and supabase_key:
+            db = SupabaseDatabaseManager(supabase_url, supabase_key)
+            print("✓ Using Supabase database")
+        else:
+            print("⚠️  Supabase URL/Key not found, falling back to SQLite")
+            db = DatabaseManager()
+            db.initialize_database()
+    except Exception as e:
+        print(f"⚠️  Error initializing Supabase: {e}, falling back to SQLite")
+        db = DatabaseManager()
+        db.initialize_database()
+else:
+    db = DatabaseManager()
+    db.initialize_database()
 
 # Initialize managers
+from database.settings_manager import SettingsManager
+settings_manager = SettingsManager(db)
 auth_manager = AuthManager(db)
 rate_limiter = RateLimiter(db)
 warmup_manager = WarmupManager(db)
@@ -853,23 +876,28 @@ def settings_page():
 # Settings API Routes
 
 @app.route('/api/settings')
-def api_get_settings():
+@optional_auth
+def api_get_settings(user_id):
     """Get all settings"""
     try:
-        settings = db.get_all_settings()
+        # Get from persistent storage
+        settings = settings_manager.get_all_settings(user_id=user_id)
+        
         # Convert string values to appropriate types
         result = {
             'email_delay': int(settings.get('email_delay', 30)),
             'max_per_hour': int(settings.get('max_per_hour', 100)),
             'email_priority': int(settings.get('email_priority', 5)),
-            'emails_per_server': int(settings.get('emails_per_server', 20))
+            'emails_per_server': int(settings.get('emails_per_server', 20)),
+            'use_threading': settings.get('use_threading', 'false').lower() == 'true'
         }
         return jsonify({'success': True, 'settings': result})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/settings/delay', methods=['POST'])
-def api_set_delay():
+@optional_auth
+def api_set_delay(user_id):
     """Set email delay setting"""
     try:
         data = request.json if request.is_json else request.form.to_dict()
@@ -882,7 +910,8 @@ def api_set_delay():
         if delay > 600:
             delay = 600
         
-        db.set_setting('email_delay', str(delay))
+        # Save to persistent storage
+        settings_manager.set_setting('email_delay', str(delay), user_id=user_id)
         
         # Update the global email sender if it exists
         global email_sender
@@ -895,26 +924,31 @@ def api_set_delay():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/settings/other', methods=['POST'])
-def api_set_other_settings():
+@optional_auth
+def api_set_other_settings(user_id):
     """Set other settings"""
     try:
         data = request.json if request.is_json else request.form.to_dict()
         
         if 'max_per_hour' in data:
-            db.set_setting('max_per_hour', str(data['max_per_hour']))
+            settings_manager.set_setting('max_per_hour', data['max_per_hour'], user_id=user_id)
         
         if 'email_priority' in data:
-            db.set_setting('email_priority', str(data['email_priority']))
+            settings_manager.set_setting('email_priority', data['email_priority'], user_id=user_id)
         
         if 'emails_per_server' in data:
-            db.set_setting('emails_per_server', str(data['emails_per_server']))
+            settings_manager.set_setting('emails_per_server', data['emails_per_server'], user_id=user_id)
+        
+        if 'use_threading' in data:
+            settings_manager.set_setting('use_threading', data['use_threading'], user_id=user_id)
         
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/settings/emails-per-server', methods=['POST'])
-def api_set_emails_per_server():
+@optional_auth
+def api_set_emails_per_server(user_id):
     """Set emails per server setting"""
     try:
         data = request.json if request.is_json else request.form.to_dict()
@@ -925,20 +959,23 @@ def api_set_emails_per_server():
         if emails_per_server > 100:
             emails_per_server = 100
         
-        db.set_setting('emails_per_server', str(emails_per_server))
+        # Save to persistent storage
+        settings_manager.set_setting('emails_per_server', str(emails_per_server), user_id=user_id)
         return jsonify({'success': True, 'emails_per_server': emails_per_server})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/settings/api-keys', methods=['GET'])
-def api_get_api_keys():
+@optional_auth
+def api_get_api_keys(user_id):
     """Get API keys (masked)"""
     try:
         from core.config import Config
         
-        # Return masked keys (show first 4 and last 4 characters)
-        perplexity_key = Config.get_perplexity_key()
-        openrouter_key = Config.get_openrouter_key()
+        # Get from persistent storage first
+        perplexity_key = settings_manager.get_setting('PERPLEXITY_API_KEY', user_id=user_id) or Config.get_perplexity_key()
+        openrouter_key = settings_manager.get_setting('OPENROUTER_API_KEY', user_id=user_id) or Config.get_openrouter_key()
+        openrouter_model = settings_manager.get_setting('OPENROUTER_MODEL', user_id=user_id) or Config.OPENROUTER_MODEL
         
         def mask_key(key):
             if not key or len(key) < 8:
@@ -950,14 +987,15 @@ def api_get_api_keys():
             'keys': {
                 'perplexity_api_key': mask_key(perplexity_key) if perplexity_key else '',
                 'openrouter_api_key': mask_key(openrouter_key) if openrouter_key else '',
-                'openrouter_model': Config.OPENROUTER_MODEL
+                'openrouter_model': openrouter_model
             }
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/settings/api-keys', methods=['POST'])
-def api_set_api_keys():
+@optional_auth
+def api_set_api_keys(user_id):
     """Set API keys"""
     try:
         data = request.json if request.is_json else request.form.to_dict()
@@ -965,53 +1003,64 @@ def api_set_api_keys():
         from core.config import Config
         
         if data.get('perplexity_api_key'):
+            settings_manager.set_setting('PERPLEXITY_API_KEY', data['perplexity_api_key'], user_id=user_id)
             Config.set_perplexity_key(data['perplexity_api_key'])
         
         if data.get('openrouter_api_key'):
+            settings_manager.set_setting('OPENROUTER_API_KEY', data['openrouter_api_key'], user_id=user_id)
             Config.set_openrouter_key(data['openrouter_api_key'])
         
         if data.get('openrouter_model'):
+            settings_manager.set_setting('OPENROUTER_MODEL', data['openrouter_model'], user_id=user_id)
             Config._update_env_file('OPENROUTER_MODEL', data['openrouter_model'])
             Config.OPENROUTER_MODEL = data['openrouter_model']
         
         return jsonify({'success': True, 'message': 'API keys saved successfully'})
     except Exception as e:
         import traceback
-        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
 
 # Database Configuration API
 @app.route('/api/settings/database', methods=['GET'])
-def api_get_database_config():
+@optional_auth
+def api_get_database_config(user_id):
     """Get database configuration"""
     try:
         from core.config import Config
+        
+        # Get from persistent storage first, then env
         config = {
-            'database_type': os.getenv('DATABASE_TYPE', 'sqlite'),
-            'supabase_url': Config.get('SUPABASE_URL') or os.getenv('SUPABASE_URL', ''),
-            'supabase_key': Config.get('SUPABASE_KEY') or os.getenv('SUPABASE_KEY', '')
+            'database_type': settings_manager.get_setting('DATABASE_TYPE', user_id=user_id) or os.getenv('DATABASE_TYPE', 'sqlite'),
+            'supabase_url': settings_manager.get_setting('SUPABASE_URL', user_id=user_id) or Config.get('SUPABASE_URL') or os.getenv('SUPABASE_URL', ''),
+            'supabase_key': settings_manager.get_setting('SUPABASE_KEY', user_id=user_id) or Config.get('SUPABASE_KEY') or os.getenv('SUPABASE_KEY', '')
         }
+        
         # Mask key if present
         if config['supabase_key'] and len(config['supabase_key']) > 8:
             key = config['supabase_key']
             config['supabase_key'] = key[:4] + '*' * (len(key) - 8) + key[-4:]
+        
         return jsonify({'success': True, 'config': config})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/settings/database', methods=['POST'])
-def api_set_database_config():
+@optional_auth
+def api_set_database_config(user_id):
     """Set database configuration"""
     try:
         data = request.json if request.is_json else request.form.to_dict()
         from core.config import Config
         
         if data.get('database_type'):
+            settings_manager.set_setting('DATABASE_TYPE', data['database_type'], user_id=user_id)
             Config._update_env_file('DATABASE_TYPE', data['database_type'])
         
         if data.get('supabase_url'):
+            settings_manager.set_setting('SUPABASE_URL', data['supabase_url'], user_id=user_id)
             Config._update_env_file('SUPABASE_URL', data['supabase_url'])
         
         if data.get('supabase_key'):
+            settings_manager.set_setting('SUPABASE_KEY', data['supabase_key'], user_id=user_id)
             Config._update_env_file('SUPABASE_KEY', data['supabase_key'])
         
         return jsonify({'success': True, 'message': 'Database configuration saved'})
@@ -1074,34 +1123,40 @@ def api_get_database_status():
 
 # Deployment Configuration API
 @app.route('/api/settings/deployment', methods=['GET'])
-def api_get_deployment_config():
+@optional_auth
+def api_get_deployment_config(user_id):
     """Get deployment configuration"""
     try:
         from core.config import Config
+        
+        # Get from persistent storage first
         config = {
-            'env_vars': Config.get('DEPLOYMENT_ENV_VARS') or '',
-            'deployment_url': Config.get('DEPLOYMENT_URL') or ''
+            'env_vars': settings_manager.get_setting('DEPLOYMENT_ENV_VARS', user_id=user_id) or Config.get('DEPLOYMENT_ENV_VARS') or '',
+            'deployment_url': settings_manager.get_setting('DEPLOYMENT_URL', user_id=user_id) or Config.get('DEPLOYMENT_URL') or ''
         }
         return jsonify({'success': True, 'config': config})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/settings/deployment', methods=['POST'])
-def api_set_deployment_config():
+@optional_auth
+def api_set_deployment_config(user_id):
     """Set deployment configuration"""
     try:
         data = request.json if request.is_json else request.form.to_dict()
         from core.config import Config
         
         if data.get('env_vars'):
+            settings_manager.set_setting('DEPLOYMENT_ENV_VARS', data['env_vars'], user_id=user_id)
             Config._update_env_file('DEPLOYMENT_ENV_VARS', data['env_vars'])
         
         if data.get('deployment_url'):
+            settings_manager.set_setting('DEPLOYMENT_URL', data['deployment_url'], user_id=user_id)
             Config._update_env_file('DEPLOYMENT_URL', data['deployment_url'])
         
         return jsonify({'success': True, 'message': 'Deployment settings saved'})
     except Exception as e:
-        import traceback
+        return jsonify({'error': str(e)}), 500
         return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
 
 # Email Sending Control API
@@ -2908,6 +2963,84 @@ def api_export_data(user_id):
             'success': True,
             'data': data
         })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Stripe Configuration API
+@app.route('/api/settings/stripe', methods=['GET'])
+@optional_auth
+def api_get_stripe_config(user_id):
+    """Get Stripe configuration"""
+    try:
+        from core.config import Config
+        
+        config = {
+            'stripe_secret_key': settings_manager.get_setting('STRIPE_SECRET_KEY', user_id=user_id) or os.getenv('STRIPE_SECRET_KEY', ''),
+            'stripe_publishable_key': settings_manager.get_setting('STRIPE_PUBLISHABLE_KEY', user_id=user_id) or os.getenv('STRIPE_PUBLISHABLE_KEY', ''),
+            'subscription_plan': settings_manager.get_setting('SUBSCRIPTION_PLAN', user_id=user_id) or 'free'
+        }
+        
+        # Mask secret key
+        if config['stripe_secret_key']:
+            key = config['stripe_secret_key']
+            config['stripe_secret_key'] = key[:4] + '*' * (len(key) - 8) + key[-4:] if len(key) > 8 else '****'
+        
+        return jsonify({'success': True, 'config': config})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/settings/stripe', methods=['POST'])
+@optional_auth
+def api_set_stripe_config(user_id):
+    """Set Stripe configuration"""
+    try:
+        data = request.json if request.is_json else request.form.to_dict()
+        from core.config import Config
+        
+        if data.get('stripe_secret_key'):
+            settings_manager.set_setting('STRIPE_SECRET_KEY', data['stripe_secret_key'], user_id=user_id)
+            Config._update_env_file('STRIPE_SECRET_KEY', data['stripe_secret_key'])
+        
+        if data.get('stripe_publishable_key'):
+            settings_manager.set_setting('STRIPE_PUBLISHABLE_KEY', data['stripe_publishable_key'], user_id=user_id)
+            Config._update_env_file('STRIPE_PUBLISHABLE_KEY', data['stripe_publishable_key'])
+        
+        if data.get('subscription_plan'):
+            settings_manager.set_setting('SUBSCRIPTION_PLAN', data['subscription_plan'], user_id=user_id)
+        
+        return jsonify({'success': True, 'message': 'Stripe configuration saved'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/settings/subscription-info', methods=['GET'])
+@require_auth
+def api_get_subscription_info(user_id):
+    """Get subscription information"""
+    try:
+        info = billing_manager.get_subscription_info(user_id)
+        return jsonify({'success': True, 'subscription': info})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/settings/test-redis', methods=['POST'])
+@optional_auth
+def api_test_redis(user_id):
+    """Test Redis connection"""
+    try:
+        data = request.json if request.is_json else request.form.to_dict()
+        redis_url = data.get('redis_url') or settings_manager.get_setting('REDIS_URL', user_id=user_id) or os.getenv('REDIS_URL')
+        
+        if not redis_url:
+            return jsonify({'success': False, 'error': 'Redis URL not configured'})
+        
+        try:
+            import redis
+            r = redis.from_url(redis_url)
+            r.ping()
+            return jsonify({'success': True, 'message': 'Redis connection successful'})
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'Redis connection failed: {str(e)}'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
