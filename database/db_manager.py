@@ -5,8 +5,40 @@ Handles all database operations using SQLite
 
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
+
+# Timezone support for IST (Kolkata)
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo('Asia/Kolkata')
+except ImportError:
+    # Fallback for Python < 3.9
+    try:
+        import pytz
+        IST = pytz.timezone('Asia/Kolkata')
+    except ImportError:
+        # If neither is available, we'll use UTC offset (not ideal but works)
+        from datetime import timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
+
+def get_ist_now():
+    """Get current datetime in IST (Kolkata) timezone as naive datetime (for database storage)"""
+    try:
+        if hasattr(IST, 'localize'):
+            # pytz timezone - get aware datetime then convert to naive
+            ist_aware = datetime.now(IST)
+            return ist_aware.replace(tzinfo=None)
+        else:
+            # zoneinfo timezone - get aware datetime then convert to naive
+            ist_aware = datetime.now(IST)
+            return ist_aware.replace(tzinfo=None)
+    except:
+        # Fallback: use UTC and add offset
+        from datetime import timedelta
+        utc_now = datetime.now(timezone.utc)
+        ist_offset = timedelta(hours=5, minutes=30)
+        return (utc_now + ist_offset).replace(tzinfo=None)
 
 class DatabaseManager:
     def __init__(self, db_path: str = None):
@@ -663,8 +695,8 @@ class DatabaseManager:
         cursor.execute("SELECT COUNT(*) FROM email_queue WHERE status = 'pending'")
         pending = cursor.fetchone()[0]
         
-        # Sent today
-        today = datetime.now().date()
+        # Sent today - use IST date
+        today = get_ist_now().date()
         cursor.execute("""
             SELECT COUNT(*) FROM email_queue 
             WHERE DATE(sent_at) = ? AND status = 'sent'
@@ -681,7 +713,7 @@ class DatabaseManager:
         conn = self.connect()
         cursor = conn.cursor()
         if not date:
-            date = datetime.now().date()
+            date = get_ist_now().date()
         
         cursor.execute("SELECT * FROM daily_stats WHERE date = ?", (date,))
         row = cursor.fetchone()

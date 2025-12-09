@@ -10,12 +10,61 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
-from email.utils import formataddr, formatdate
-from datetime import datetime
+from email.utils import formataddr, format_datetime
+from datetime import datetime, timezone
 import os
 import re
 import uuid
 import imaplib
+
+# Timezone support for IST (Kolkata)
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo('Asia/Kolkata')
+except ImportError:
+    # Fallback for Python < 3.9
+    try:
+        import pytz
+        IST = pytz.timezone('Asia/Kolkata')
+    except ImportError:
+        # If neither is available, we'll use UTC offset (not ideal but works)
+        IST = timezone(timedelta(hours=5, minutes=30))
+
+def get_ist_now():
+    """Get current datetime in IST (Kolkata) timezone as naive datetime (for database storage)"""
+    try:
+        if hasattr(IST, 'localize'):
+            # pytz timezone - get aware datetime then convert to naive
+            ist_aware = datetime.now(IST)
+            return ist_aware.replace(tzinfo=None)
+        else:
+            # zoneinfo timezone - get aware datetime then convert to naive
+            ist_aware = datetime.now(IST)
+            return ist_aware.replace(tzinfo=None)
+    except:
+        # Fallback: use UTC and add offset
+        from datetime import timedelta
+        utc_now = datetime.now(timezone.utc)
+        ist_offset = timedelta(hours=5, minutes=30)
+        return (utc_now + ist_offset).replace(tzinfo=None)
+
+def get_ist_now_aware():
+    """Get current datetime in IST (Kolkata) timezone as timezone-aware datetime"""
+    try:
+        if hasattr(IST, 'localize'):
+            # pytz timezone
+            return datetime.now(IST)
+        else:
+            # zoneinfo timezone
+            return datetime.now(IST)
+    except:
+        # Fallback: use UTC and add offset
+        from datetime import timedelta
+        utc_now = datetime.now(timezone.utc)
+        ist_offset = timedelta(hours=5, minutes=30)
+        ist_aware = (utc_now + ist_offset)
+        # Create a timezone object for the offset
+        return ist_aware.replace(tzinfo=timezone(ist_offset))
 
 class EmailSender:
     def __init__(self, db_manager, interval=30.0, max_threads=1):
@@ -501,7 +550,9 @@ class EmailSender:
         
         # Add important headers to prevent bounces and spam
         msg['Message-ID'] = f"<{uuid.uuid4()}@anaghasolution.com>"
-        msg['Date'] = formatdate(localtime=True)
+        # Use IST timezone for email Date header
+        ist_aware = get_ist_now_aware()
+        msg['Date'] = format_datetime(ist_aware)
         msg['MIME-Version'] = '1.0'
         msg['X-Mailer'] = 'ANAGHA SOLUTION Email Client v1.0'
         msg['X-Priority'] = '3'
@@ -852,7 +903,8 @@ class EmailSender:
         conn = self.db.connect()
         cursor = conn.cursor()
         
-        now = datetime.now()
+        # Use IST timezone for timestamp
+        now = get_ist_now()
         
         # Get recipient and campaign info if not provided
         if not recipient_info:
@@ -960,8 +1012,8 @@ class EmailSender:
             """, (now, campaign_id))
             print(f"Campaign {campaign_id} marked as sent (all emails delivered)")
         
-        # Update daily stats
-        today = datetime.now().date()
+        # Update daily stats - use IST date
+        today = get_ist_now().date()
         cursor.execute("""
             INSERT OR REPLACE INTO daily_stats (date, emails_sent, emails_delivered)
             VALUES (?, 

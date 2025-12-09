@@ -764,7 +764,8 @@ def api_get_settings():
         result = {
             'email_delay': int(settings.get('email_delay', 30)),
             'max_per_hour': int(settings.get('max_per_hour', 100)),
-            'email_priority': int(settings.get('email_priority', 5))
+            'email_priority': int(settings.get('email_priority', 5)),
+            'emails_per_server': int(settings.get('emails_per_server', 20))
         }
         return jsonify({'success': True, 'settings': result})
     except Exception as e:
