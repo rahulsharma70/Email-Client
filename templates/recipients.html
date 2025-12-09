@@ -108,12 +108,37 @@
 document.getElementById('importForm').addEventListener('submit', async function(e) {
     e.preventDefault();
     
+<<<<<<< HEAD
+=======
+    const fileInput = document.querySelector('input[type="file"]');
+    const file = fileInput.files[0];
+    
+    if (!file) {
+        showAlert('Please select a file to import', 'error');
+        return;
+    }
+    
+    // Check file size (max 50MB)
+    const maxSize = 50 * 1024 * 1024; // 50MB
+    if (file.size > maxSize) {
+        showAlert('File is too large. Maximum size is 50MB. Please use a smaller file.', 'error');
+        return;
+    }
+    
+    // Show loading indicator
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    const originalBtnText = submitBtn.innerHTML;
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Importing...';
+    
+>>>>>>> 5cd6a8d (New version with the dashboard)
     const formData = new FormData(e.target);
     
     try {
         const response = await axios.post('/api/recipients/import', formData, {
             headers: {
                 'Content-Type': 'multipart/form-data'
+<<<<<<< HEAD
             }
         });
         
@@ -123,6 +148,52 @@ document.getElementById('importForm').addEventListener('submit', async function(
         }, 1500);
     } catch (error) {
         showAlert('Error importing: ' + (error.response?.data?.error || error.message), 'error');
+=======
+            },
+            timeout: 300000, // 5 minutes timeout for large files
+            onUploadProgress: function(progressEvent) {
+                if (progressEvent.total) {
+                    const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                    submitBtn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Uploading... ${percentCompleted}%`;
+                }
+            }
+        });
+        
+        submitBtn.innerHTML = originalBtnText;
+        submitBtn.disabled = false;
+        
+        if (response.data.success) {
+            showAlert(`Successfully imported ${response.data.count} recipients!`, 'success');
+            setTimeout(() => {
+                refreshRecipients();
+            }, 1500);
+            // Reset form
+            e.target.reset();
+        } else {
+            showAlert('Import failed: ' + (response.data.error || 'Unknown error'), 'error');
+        }
+    } catch (error) {
+        submitBtn.innerHTML = originalBtnText;
+        submitBtn.disabled = false;
+        
+        let errorMessage = 'Error importing: ';
+        
+        if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+            errorMessage += 'Request timed out. The file might be too large. Please try a smaller file or split it into multiple files.';
+        } else if (error.response) {
+            // Server responded with error
+            errorMessage += error.response.data?.error || error.response.statusText || 'Server error';
+        } else if (error.request) {
+            // Request made but no response
+            errorMessage += 'Network error. Please check your connection and try again.';
+        } else {
+            // Something else happened
+            errorMessage += error.message || 'Unknown error';
+        }
+        
+        console.error('Import error:', error);
+        showAlert(errorMessage, 'error');
+>>>>>>> 5cd6a8d (New version with the dashboard)
     }
 });
 

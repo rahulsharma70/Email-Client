@@ -8,6 +8,7 @@
 </div>
 
 <div class="form-container">
+<<<<<<< HEAD
     <h2>Sending Settings</h2>
     <form id="settingsForm">
         <div class="form-group">
@@ -24,10 +25,71 @@
             <label>
                 <input type="checkbox" name="use_threading" checked> Enable Multi-Thread Sending
             </label>
+=======
+    <h2><i class="fas fa-clock"></i> Email Sending Delay</h2>
+    <p style="color: #888; margin-bottom: 20px;">Select the time delay between sending each email. This helps avoid spam filters and ensures reliable delivery.</p>
+    
+    <form id="delaySettingsForm">
+        <div class="radio-group">
+            <label class="radio-option">
+                <input type="radio" name="email_delay" value="10">
+                <span class="radio-label">
+                    <span class="radio-title">10 Seconds</span>
+                    <span class="radio-desc">Fast sending (may trigger spam filters)</span>
+                </span>
+            </label>
+            
+            <label class="radio-option">
+                <input type="radio" name="email_delay" value="30" checked>
+                <span class="radio-label">
+                    <span class="radio-title">30 Seconds</span>
+                    <span class="radio-desc">Recommended - Good balance of speed and safety</span>
+                </span>
+            </label>
+            
+            <label class="radio-option">
+                <input type="radio" name="email_delay" value="60">
+                <span class="radio-label">
+                    <span class="radio-title">60 Seconds (1 minute)</span>
+                    <span class="radio-desc">Safe sending for sensitive email servers</span>
+                </span>
+            </label>
+            
+            <label class="radio-option">
+                <input type="radio" name="email_delay" value="120">
+                <span class="radio-label">
+                    <span class="radio-title">120 Seconds (2 minutes)</span>
+                    <span class="radio-desc">Very safe - Best for strict email providers</span>
+                </span>
+            </label>
+            
+            <label class="radio-option">
+                <input type="radio" name="email_delay" value="300">
+                <span class="radio-label">
+                    <span class="radio-title">300 Seconds (5 minutes)</span>
+                    <span class="radio-desc">Maximum safety - Slowest but most reliable</span>
+                </span>
+            </label>
+        </div>
+        
+        <button type="submit" class="btn btn-success" style="margin-top: 20px;">
+            <i class="fas fa-save"></i> Save Delay Settings
+        </button>
+    </form>
+</div>
+
+<div class="form-container" style="margin-top: 30px;">
+    <h2><i class="fas fa-cog"></i> Other Settings</h2>
+    <form id="otherSettingsForm">
+        <div class="form-group">
+            <label>Max Emails Per SMTP Per Hour</label>
+            <input type="number" name="max_per_hour" value="100" id="maxPerHour">
+>>>>>>> 5cd6a8d (New version with the dashboard)
         </div>
         
         <div class="form-group">
             <label>Email Queue Priority (1-10)</label>
+<<<<<<< HEAD
             <input type="number" name="priority" value="5" min="1" max="10">
         </div>
         
@@ -36,10 +98,99 @@
         </button>
     </form>
 </div>
+=======
+            <input type="number" name="priority" value="5" min="1" max="10" id="emailPriority">
+        </div>
+        
+        <button type="submit" class="btn btn-success">
+            <i class="fas fa-save"></i> Save Other Settings
+        </button>
+    </form>
+</div>
+
+<style>
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.radio-option {
+    display: flex;
+    align-items: center;
+    padding: 15px 20px;
+    background: #2a2a40;
+    border: 2px solid #3a3a50;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.radio-option:hover {
+    border-color: #667eea;
+    background: #32324a;
+}
+
+.radio-option input[type="radio"] {
+    width: 22px;
+    height: 22px;
+    margin-right: 15px;
+    accent-color: #667eea;
+    cursor: pointer;
+}
+
+.radio-option input[type="radio"]:checked + .radio-label .radio-title {
+    color: #667eea;
+}
+
+.radio-option:has(input:checked) {
+    border-color: #667eea;
+    background: linear-gradient(135deg, rgba(102, 126, 234, 0.1), rgba(118, 75, 162, 0.1));
+}
+
+.radio-label {
+    display: flex;
+    flex-direction: column;
+}
+
+.radio-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 4px;
+}
+
+.radio-desc {
+    font-size: 13px;
+    color: #888;
+}
+
+.current-setting {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: white;
+    padding: 15px 20px;
+    border-radius: 10px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.current-setting i {
+    font-size: 24px;
+}
+
+.current-setting .value {
+    font-size: 24px;
+    font-weight: bold;
+}
+</style>
+>>>>>>> 5cd6a8d (New version with the dashboard)
 {% endblock %}
 
 {% block extra_js %}
 <script>
+<<<<<<< HEAD
 document.getElementById('settingsForm').addEventListener('submit', function(e) {
     e.preventDefault();
     showAlert('Settings saved successfully!', 'success');
@@ -47,3 +198,95 @@ document.getElementById('settingsForm').addEventListener('submit', function(e) {
 </script>
 {% endblock %}
 
+=======
+// Load current settings on page load
+document.addEventListener('DOMContentLoaded', function() {
+    loadSettings();
+});
+
+function loadSettings() {
+    fetch('/api/settings')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Set the radio button based on saved delay
+                const delay = data.settings.email_delay || 30;
+                const radio = document.querySelector(`input[name="email_delay"][value="${delay}"]`);
+                if (radio) {
+                    radio.checked = true;
+                }
+                
+                // Set other settings
+                if (data.settings.max_per_hour) {
+                    document.getElementById('maxPerHour').value = data.settings.max_per_hour;
+                }
+                if (data.settings.email_priority) {
+                    document.getElementById('emailPriority').value = data.settings.email_priority;
+                }
+            }
+        })
+        .catch(error => {
+            console.log('Could not load settings, using defaults');
+        });
+}
+
+// Save delay settings
+document.getElementById('delaySettingsForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    
+    const selectedDelay = document.querySelector('input[name="email_delay"]:checked').value;
+    
+    fetch('/api/settings/delay', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            email_delay: parseInt(selectedDelay)
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showAlert(`Email delay set to ${selectedDelay} seconds!`, 'success');
+        } else {
+            showAlert('Failed to save settings: ' + (data.error || 'Unknown error'), 'danger');
+        }
+    })
+    .catch(error => {
+        showAlert('Error saving settings: ' + error, 'danger');
+    });
+});
+
+// Save other settings
+document.getElementById('otherSettingsForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    
+    const maxPerHour = document.getElementById('maxPerHour').value;
+    const priority = document.getElementById('emailPriority').value;
+    
+    fetch('/api/settings/other', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            max_per_hour: parseInt(maxPerHour),
+            email_priority: parseInt(priority)
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showAlert('Settings saved successfully!', 'success');
+        } else {
+            showAlert('Failed to save settings: ' + (data.error || 'Unknown error'), 'danger');
+        }
+    })
+    .catch(error => {
+        showAlert('Error saving settings: ' + error, 'danger');
+    });
+});
+</script>
+{% endblock %}
+>>>>>>> 5cd6a8d (New version with the dashboard)

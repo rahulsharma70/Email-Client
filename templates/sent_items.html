@@ -23,7 +23,12 @@
     <table id="sentEmailsTable">
         <thead>
             <tr>
+<<<<<<< HEAD
                 <th>Date & Time</th>
+=======
+                <th>Date & Time (IST)</th>
+                <th>From</th>
+>>>>>>> 5cd6a8d (New version with the dashboard)
                 <th>To</th>
                 <th>Subject</th>
                 <th>Campaign</th>
@@ -33,7 +38,11 @@
         </thead>
         <tbody id="sentEmailsTableBody">
             <tr>
+<<<<<<< HEAD
                 <td colspan="6" style="text-align: center; padding: 20px; color: #7f8c8d;">
+=======
+                <td colspan="7" style="text-align: center; padding: 20px; color: #7f8c8d;">
+>>>>>>> 5cd6a8d (New version with the dashboard)
                     Loading sent emails...
                 </td>
             </tr>
@@ -63,30 +72,185 @@ let currentPage = 0;
 let pageSize = 50;
 let currentSearch = '';
 
+<<<<<<< HEAD
 async function loadSentEmails(page = 0) {
     try {
         const offset = page * pageSize;
         const url = `/api/sent-emails?limit=${pageSize}&offset=${offset}${currentSearch ? '&search=' + encodeURIComponent(currentSearch) : ''}`;
         const response = await axios.get(url);
+=======
+async function loadSentEmails(page = 0, forceRefresh = false) {
+    try {
+        const offset = page * pageSize;
+        // Add timestamp to prevent caching
+        const cacheBuster = forceRefresh ? '&_t=' + Date.now() : '';
+        const url = `/api/sent-emails?limit=${pageSize}&offset=${offset}${currentSearch ? '&search=' + encodeURIComponent(currentSearch) : ''}${cacheBuster}`;
+        const response = await axios.get(url, {
+            headers: {
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
+            }
+        });
+>>>>>>> 5cd6a8d (New version with the dashboard)
         
         if (response.data.success) {
             displaySentEmails(response.data.sent_emails);
             updatePagination(response.data.total, page);
+<<<<<<< HEAD
         }
     } catch (error) {
+=======
+            console.log(`✅ Loaded ${response.data.sent_emails.length} sent emails (page ${page})`);
+        }
+    } catch (error) {
+        console.error('Error loading sent emails:', error);
+>>>>>>> 5cd6a8d (New version with the dashboard)
         showAlert('Error loading sent emails: ' + (error.response?.data?.error || error.message), 'error');
     }
 }
 
+<<<<<<< HEAD
+=======
+function formatDateIST(dateStr) {
+    if (!dateStr) return '-';
+    try {
+        // Handle ISO format with timezone (from API)
+        let date;
+        if (dateStr.includes('T') || dateStr.includes('+') || dateStr.includes('Z')) {
+            // ISO format with timezone
+            date = new Date(dateStr);
+        } else if (dateStr.includes('-') && dateStr.includes(':')) {
+            // Format like "2025-12-08 13:49:13" - assume UTC and convert to IST
+            date = new Date(dateStr + ' UTC');
+        } else {
+            // Try standard parsing
+            date = new Date(dateStr);
+        }
+        
+        if (isNaN(date.getTime())) {
+            console.warn('Invalid date:', dateStr);
+            return dateStr;
+        }
+        
+        // Format date in IST (Kolkata timezone) - ALWAYS use Asia/Kolkata
+        const formatted = date.toLocaleString('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
+        return formatted + ' IST';
+    } catch (error) {
+        console.error('Error formatting date:', error, dateStr);
+        return dateStr;
+    }
+}
+
+function formatDateShortIST(dateStr) {
+    if (!dateStr) return '-';
+    try {
+        let date;
+        
+        // Handle ISO format with timezone (from API - should have +05:30 for IST)
+        if (dateStr.includes('T') && (dateStr.includes('+05:30') || dateStr.includes('+0530'))) {
+            // ISO format with IST timezone - parse directly (already in IST)
+            date = new Date(dateStr);
+        } else if (dateStr.includes('T') && (dateStr.includes('+') || dateStr.includes('Z'))) {
+            // ISO format with other timezone - parse and convert to IST
+            date = new Date(dateStr);
+        } else if (dateStr.includes('T')) {
+            // ISO format without timezone - assume UTC and convert to IST
+            date = new Date(dateStr + 'Z');
+        } else if (dateStr.includes('-') && dateStr.includes(':')) {
+            // Format like "2025-12-08 13:49:13" - assume UTC and convert to IST
+            const cleanDateStr = dateStr.split('.')[0]; // Remove microseconds if present
+            date = new Date(cleanDateStr + ' UTC');
+        } else {
+            // Try standard parsing
+            date = new Date(dateStr);
+        }
+        
+        if (isNaN(date.getTime())) {
+            console.warn('⚠ Invalid date:', dateStr);
+            return dateStr;
+        }
+        
+        // ALWAYS use Asia/Kolkata timezone for all date operations
+        const now = new Date();
+        const nowISTYear = parseInt(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', year: 'numeric' }));
+        const nowISTMonth = parseInt(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', month: 'numeric' })) - 1;
+        const nowISTDay = parseInt(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', day: 'numeric' }));
+        
+        const dateISTYear = parseInt(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', year: 'numeric' }));
+        const dateISTMonth = parseInt(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', month: 'numeric' })) - 1;
+        const dateISTDay = parseInt(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', day: 'numeric' }));
+        
+        const isToday = (dateISTYear === nowISTYear && dateISTMonth === nowISTMonth && dateISTDay === nowISTDay);
+        
+        // Get IST time string for display
+        const istTime = date.toLocaleTimeString('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        });
+        
+        const istDate = date.toLocaleString('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        });
+        
+        const istFullDate = date.toLocaleString('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        });
+        
+        // Today - show time only
+        if (isToday) {
+            return istTime + ' IST';
+        }
+        
+        // This year - show date and time
+        if (dateISTYear === nowISTYear) {
+            return istDate + ' IST';
+        }
+        
+        // Older - show full date and time
+        return istFullDate + ' IST';
+    } catch (error) {
+        console.error('Error formatting date:', error, dateStr);
+        return dateStr;
+    }
+}
+
+>>>>>>> 5cd6a8d (New version with the dashboard)
 function displaySentEmails(emails) {
     const tbody = document.getElementById('sentEmailsTableBody');
     
     if (emails.length === 0) {
+<<<<<<< HEAD
         tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 20px; color: #7f8c8d;">No sent emails found.</td></tr>';
+=======
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 20px; color: #7f8c8d;">No sent emails found.</td></tr>';
+>>>>>>> 5cd6a8d (New version with the dashboard)
         return;
     }
     
     tbody.innerHTML = emails.map(email => {
+<<<<<<< HEAD
         const sentDate = email.sent_at ? new Date(email.sent_at).toLocaleString() : '-';
         const recipientName = email.recipient_name || email.recipient_email;
         const campaignName = email.campaign_name || 'N/A';
@@ -94,6 +258,52 @@ function displaySentEmails(emails) {
         return `
             <tr>
                 <td>${sentDate}</td>
+=======
+        const sentDate = formatDateShortIST(email.sent_at);
+        const recipientName = email.recipient_name || email.recipient_email;
+        const campaignName = email.campaign_name || 'N/A';
+        
+        // Get sender email - check multiple possible fields
+        let senderEmail = email.sender_email || email.sender_email_address || '';
+        const senderName = email.sender_name || '';
+        
+        // Debug logging
+        if (!senderEmail || senderEmail === '' || senderEmail === 'N/A') {
+            console.warn(`⚠ Email ${email.id} has no sender_email:`, {
+                sender_email: email.sender_email,
+                sender_name: email.sender_name,
+                smtp_server_id: email.smtp_server_id,
+                full_email: email
+            });
+        }
+        
+        // If sender email is still empty, try to get from SMTP server
+        if (!senderEmail || senderEmail === '' || senderEmail === 'N/A') {
+            if (email.smtp_server_id) {
+                // We'll fetch this on the backend, but for now show placeholder
+                senderEmail = 'Loading...';
+            } else {
+                senderEmail = 'N/A';
+            }
+        }
+        
+        // Format the From display
+        let fromDisplay;
+        if (senderEmail && senderEmail !== 'N/A' && senderEmail !== 'Loading...' && senderEmail.trim() !== '') {
+            if (senderName && senderName.trim() !== '') {
+                fromDisplay = `${senderName} <${senderEmail}>`;
+            } else {
+                fromDisplay = senderEmail;
+            }
+        } else {
+            fromDisplay = 'N/A';
+        }
+        
+        return `
+            <tr>
+                <td>${sentDate}</td>
+                <td>${fromDisplay}</td>
+>>>>>>> 5cd6a8d (New version with the dashboard)
                 <td>${recipientName}</td>
                 <td>${email.subject || '-'}</td>
                 <td>${campaignName}</td>
@@ -144,7 +354,12 @@ function searchSentEmails() {
 }
 
 function refreshSentEmails() {
+<<<<<<< HEAD
     loadSentEmails(currentPage);
+=======
+    console.log('🔄 Refreshing sent emails...');
+    loadSentEmails(currentPage, true); // Force refresh
+>>>>>>> 5cd6a8d (New version with the dashboard)
 }
 
 async function viewEmail(emailId) {
@@ -154,11 +369,26 @@ async function viewEmail(emailId) {
             const email = response.data.email;
             document.getElementById('modalSubject').textContent = email.subject || 'Email Details';
             
+<<<<<<< HEAD
             const content = `
                 <div style="margin-bottom: 15px;">
                     <strong>To:</strong> ${email.recipient_email}<br>
                     <strong>From:</strong> ${email.sender_name} &lt;${email.sender_email}&gt;<br>
                     <strong>Date:</strong> ${email.sent_at ? new Date(email.sent_at).toLocaleString() : '-'}<br>
+=======
+            // Ensure sender email is displayed correctly
+            const senderEmail = email.sender_email || 'N/A';
+            const senderName = email.sender_name || '';
+            const fromDisplay = (senderEmail && senderEmail !== 'N/A' && senderEmail.trim() !== '') 
+                ? (senderName ? `${senderName} <${senderEmail}>` : senderEmail)
+                : 'N/A';
+            
+            const content = `
+                <div style="margin-bottom: 15px;">
+                    <strong>To:</strong> ${email.recipient_email}<br>
+                    <strong>From:</strong> ${fromDisplay}<br>
+                    <strong>Date:</strong> ${formatDateIST(email.sent_at)}<br>
+>>>>>>> 5cd6a8d (New version with the dashboard)
                     <strong>Campaign:</strong> ${email.campaign_name || 'N/A'}<br>
                     <strong>Subject:</strong> ${email.subject || '-'}
                 </div>

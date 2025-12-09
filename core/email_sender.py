@@ -10,12 +10,17 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+<<<<<<< HEAD
 from email.utils import formataddr, formatdate
+=======
+from email.utils import formataddr, formatdate, format_datetime
+>>>>>>> 5cd6a8d (New version with the dashboard)
 from datetime import datetime
 import os
 import re
 import uuid
 import imaplib
+<<<<<<< HEAD
 
 class EmailSender:
     def __init__(self, db_manager, interval=1.0, max_threads=5):
@@ -25,6 +30,42 @@ class EmailSender:
         self.is_sending = False
         self.threads = []
         self.lock = threading.Lock()
+=======
+import pytz
+
+class EmailSender:
+    def __init__(self, db_manager, interval=30.0, max_threads=1):
+        """
+        Initialize email sender
+        
+        Args:
+            db_manager: Database manager instance
+            interval: Delay in seconds between sending each email (default: 30 seconds)
+            max_threads: Number of worker threads (default: 1 for sequential sending)
+        """
+        self.db = db_manager
+        self.interval = interval  # 30 seconds delay between emails
+        self.max_threads = max_threads  # Single thread for controlled sending
+        self.is_sending = False
+        self.is_paused = False  # Pause state
+        self.threads = []
+        self.lock = threading.Lock()
+
+    def log_sent_email(self, to_email: str, from_email: str, subject: str):
+        """Log sent email details in IST for audit/debug."""
+        try:
+            tz_kolkata = pytz.timezone("Asia/Kolkata")
+            now_ist = datetime.now(tz_kolkata)
+            human_time = now_ist.strftime("%d %b %Y, %H:%M:%S %Z")
+            print("----- SENT EMAIL -----")
+            print(f"To:   {to_email}")
+            print(f"From: {from_email}")
+            print(f"Date: {human_time}")
+            print(f"Subj: {subject}")
+            print("----------------------")
+        except Exception as log_err:
+            print(f"⚠ Error logging sent email: {log_err}")
+>>>>>>> 5cd6a8d (New version with the dashboard)
         
     def start_sending(self):
         """Start sending emails from queue"""
@@ -47,6 +88,30 @@ class EmailSender:
     def stop_sending(self):
         """Stop sending emails"""
         self.is_sending = False
+<<<<<<< HEAD
+=======
+        self.is_paused = False
+        print("🛑 Email sending stopped")
+    
+    def pause_sending(self):
+        """Pause sending emails (can be resumed)"""
+        self.is_paused = True
+        print("⏸️ Email sending paused")
+    
+    def resume_sending(self):
+        """Resume sending emails after pause"""
+        self.is_paused = False
+        print("▶️ Email sending resumed")
+    
+    def get_status(self):
+        """Get current sending status"""
+        if not self.is_sending:
+            return 'stopped'
+        elif self.is_paused:
+            return 'paused'
+        else:
+            return 'sending'
+>>>>>>> 5cd6a8d (New version with the dashboard)
     
     def worker_thread(self):
         """Worker thread for sending emails"""
@@ -54,12 +119,25 @@ class EmailSender:
         print(f"Worker thread {thread_name} started")
         while self.is_sending:
             try:
+<<<<<<< HEAD
+=======
+                # Check if paused
+                if self.is_paused:
+                    print(f"[{thread_name}] Email sending is paused, waiting...")
+                    time.sleep(2)
+                    continue
+                
+>>>>>>> 5cd6a8d (New version with the dashboard)
                 # Get next email from queue
                 queue_item = self.get_next_queue_item()
                 
                 if queue_item:
                     print(f"[{thread_name}] Processing email for {queue_item.get('email', 'unknown')}")
                     self.send_email(queue_item)
+<<<<<<< HEAD
+=======
+                    print(f"[{thread_name}] Waiting {self.interval} seconds before next email...")
+>>>>>>> 5cd6a8d (New version with the dashboard)
                     time.sleep(self.interval)
                 else:
                     # No items in queue, wait a bit
@@ -79,6 +157,7 @@ class EmailSender:
             
             # Use a transaction with row-level locking to prevent duplicate processing
             # First, find and lock a pending item
+<<<<<<< HEAD
             cursor.execute("""
                 SELECT eq.id as queue_id, eq.campaign_id, eq.recipient_id, eq.smtp_server_id,
                        c.name as campaign_name, c.subject, c.sender_name, c.sender_email, 
@@ -92,6 +171,30 @@ class EmailSender:
                 WHERE eq.status = 'pending' AND r.is_unsubscribed = 0 
                   AND s.is_active = 1 AND s.password IS NOT NULL AND s.password != ''
                 ORDER BY eq.priority DESC, eq.created_at ASC
+=======
+            # First, get queue items with valid SMTP server assignments
+            # We need to ensure the SMTP server exists and is active
+            # Get queue items with round-robin distribution across SMTP servers
+            # This ensures we rotate through different SMTP servers instead of processing all from one server
+            cursor.execute("""
+                SELECT eq.id as queue_id, eq.campaign_id, eq.recipient_id, eq.smtp_server_id, eq.sender_email as queue_sender_email,
+                       c.name as campaign_name, c.subject, c.sender_name, c.sender_email, 
+                       c.reply_to, c.html_content,
+                       r.email, r.first_name, r.last_name, r.company, r.city, r.is_unsubscribed,
+                       s.host, s.port, s.username, s.password, s.use_tls, s.use_ssl, s.is_active,
+                       s.name as smtp_server_name
+                FROM email_queue eq
+                JOIN campaigns c ON eq.campaign_id = c.id
+                JOIN recipients r ON eq.recipient_id = r.id
+                INNER JOIN smtp_servers s ON eq.smtp_server_id = s.id
+                WHERE eq.status = 'pending' 
+                  AND r.is_unsubscribed = 0 
+                  AND s.is_active = 1 
+                  AND s.password IS NOT NULL 
+                  AND s.password != ''
+                  AND eq.smtp_server_id IS NOT NULL
+                ORDER BY eq.created_at ASC, eq.smtp_server_id ASC, eq.priority DESC
+>>>>>>> 5cd6a8d (New version with the dashboard)
                 LIMIT 1
             """)
             
@@ -114,7 +217,15 @@ class EmailSender:
                     return None
                 
                 conn.commit()
+<<<<<<< HEAD
                 print(f"[{threading.current_thread().name}] Locked queue item {queue_id} for processing")
+=======
+                smtp_id = queue_item.get('smtp_server_id')
+                smtp_username = queue_item.get('username', 'N/A')
+                smtp_server_name = queue_item.get('smtp_server_name', 'Unknown')
+                print(f"[{threading.current_thread().name}] Locked queue item {queue_id} for processing")
+                print(f"   📧 Using SMTP Server ID: {smtp_id} ({smtp_server_name}), Username: {smtp_username}")
+>>>>>>> 5cd6a8d (New version with the dashboard)
                 
                 # Return the queue item
                 return queue_item
@@ -134,8 +245,25 @@ class EmailSender:
                 self.mark_skipped(queue_item['queue_id'], "Recipient unsubscribed")
                 return
             
+<<<<<<< HEAD
             # Get SMTP server config from queue_item or fetch
             if queue_item.get('host') and queue_item.get('password'):
+=======
+            # Get SMTP server config from queue_item
+            # CRITICAL: Always use the SMTP server assigned in the queue item
+            queue_smtp_id = queue_item.get('smtp_server_id')
+            
+            # Validate that we have an SMTP server ID
+            if not queue_smtp_id:
+                error_msg = f"No SMTP server ID in queue item {queue_item.get('queue_id', 'unknown')}"
+                print(f"✗ {error_msg}")
+                print(f"   Queue item details: campaign_id={queue_item.get('campaign_id')}, recipient_id={queue_item.get('recipient_id')}")
+                self.mark_failed(queue_item['queue_id'], error_msg)
+                return
+            
+            # First try to use SMTP config from the JOIN (most reliable)
+            if queue_item.get('host') and queue_item.get('password') and queue_item.get('username'):
+>>>>>>> 5cd6a8d (New version with the dashboard)
                 smtp_config = {
                     'host': queue_item['host'],
                     'port': queue_item['port'],
@@ -144,6 +272,7 @@ class EmailSender:
                     'use_ssl': queue_item.get('use_ssl', 0),
                     'use_tls': queue_item.get('use_tls', 0)
                 }
+<<<<<<< HEAD
             else:
                 smtp_config = self.get_smtp_config(queue_item.get('smtp_server_id'))
                 if not smtp_config:
@@ -152,6 +281,29 @@ class EmailSender:
                 if not smtp_config.get('password'):
                     self.mark_failed(queue_item['queue_id'], "SMTP password is missing")
                     return
+=======
+                print(f"   Using SMTP config from queue JOIN: {queue_item.get('username')} @ {queue_item.get('host')}")
+            elif queue_smtp_id:
+                # Fallback: fetch SMTP config using the queue's smtp_server_id
+                print(f"   Fetching SMTP config for server ID: {queue_smtp_id}")
+                smtp_config = self.get_smtp_config(queue_smtp_id)
+                if not smtp_config:
+                    error_msg = f"SMTP server {queue_smtp_id} not found or not active"
+                    print(f"✗ {error_msg}")
+                    self.mark_failed(queue_item['queue_id'], error_msg)
+                    return
+                if not smtp_config.get('password'):
+                    error_msg = f"SMTP server {queue_smtp_id} password is missing"
+                    print(f"✗ {error_msg}")
+                    self.mark_failed(queue_item['queue_id'], error_msg)
+                    return
+                print(f"   Using SMTP config: {smtp_config.get('username')} @ {smtp_config.get('host')}")
+            else:
+                error_msg = "No SMTP server ID in queue item and no SMTP config in JOIN"
+                print(f"✗ {error_msg}")
+                self.mark_failed(queue_item['queue_id'], error_msg)
+                return
+>>>>>>> 5cd6a8d (New version with the dashboard)
             
             # Validate password is not None or empty
             if not smtp_config.get('password') or smtp_config['password'].strip() == '':
@@ -178,14 +330,56 @@ class EmailSender:
             smtp_config['password'] = password
             
             # Prepare campaign and recipient dicts
+<<<<<<< HEAD
             campaign = {
                 'subject': queue_item.get('subject', ''),
                 'sender_name': queue_item.get('sender_name', ''),
                 'sender_email': queue_item.get('sender_email', ''),
+=======
+            # Use queue item's sender_email if available, otherwise use campaign's sender_email
+            queue_sender_email = queue_item.get('queue_sender_email') or ''
+            if queue_sender_email:
+                queue_sender_email = str(queue_sender_email).strip()
+            else:
+                queue_sender_email = ''
+            
+            campaign_sender_email = queue_item.get('sender_email') or ''
+            if campaign_sender_email:
+                campaign_sender_email = str(campaign_sender_email).strip()
+            else:
+                campaign_sender_email = ''
+            
+            # Get SMTP username as fallback
+            smtp_username_fallback = queue_item.get('username') or ''
+            if smtp_username_fallback:
+                smtp_username_fallback = str(smtp_username_fallback).strip()
+            else:
+                smtp_username_fallback = ''
+            
+            # Priority: queue_sender_email > campaign_sender_email > SMTP username
+            final_sender_email = queue_sender_email if queue_sender_email else (campaign_sender_email if campaign_sender_email else smtp_username_fallback)
+            
+            campaign = {
+                'subject': queue_item.get('subject', ''),
+                'sender_name': queue_item.get('sender_name', ''),
+                'sender_email': final_sender_email,  # Use queue item's sender email if available
+>>>>>>> 5cd6a8d (New version with the dashboard)
                 'reply_to': queue_item.get('reply_to'),
                 'html_content': queue_item.get('html_content', '')
             }
             
+<<<<<<< HEAD
+=======
+            if queue_sender_email:
+                print(f"   📧 Using queue-specific sender email: {queue_sender_email}")
+            elif campaign_sender_email:
+                print(f"   📧 Using campaign sender email: {campaign_sender_email}")
+            elif smtp_username_fallback:
+                print(f"   📧 No sender email specified, using SMTP account email: {smtp_username_fallback}")
+            else:
+                print(f"   ⚠ WARNING: No sender email found anywhere! This may cause issues.")
+            
+>>>>>>> 5cd6a8d (New version with the dashboard)
             recipient = {
                 'email': queue_item.get('email', ''),
                 'first_name': queue_item.get('first_name', ''),
@@ -212,7 +406,13 @@ class EmailSender:
                     self.mark_failed(queue_item['queue_id'], error_msg)
                     return
                 
+<<<<<<< HEAD
                 print(f"Connecting to SMTP: {smtp_host}:{smtp_port} as {smtp_username}")
+=======
+                print(f"🔗 Connecting to SMTP: {smtp_host}:{smtp_port} as {smtp_username}")
+                print(f"   Queue SMTP Server ID: {queue_item.get('smtp_server_id')}")
+                print(f"   Using SMTP Config: {smtp_config.get('username')} @ {smtp_config.get('host')}")
+>>>>>>> 5cd6a8d (New version with the dashboard)
                 
                 # Connect to SMTP server
                 if smtp_config.get('use_ssl') or smtp_config.get('use_ssl') == 1:
@@ -330,11 +530,31 @@ class EmailSender:
                 # The From header in the message can be different, but envelope must match auth
                 to_email = recipient['email']
                 
+<<<<<<< HEAD
                 # Use sendmail with authenticated email as envelope sender
                 # This prevents bounces due to authentication mismatches
                 try:
                     server.sendmail(smtp_username, [to_email], msg.as_string())
                     print(f"✓ Email sent successfully to {to_email}")
+=======
+                # Get the actual sender email used (from queue item or campaign)
+                actual_sender_email_used = campaign.get('sender_email', '') or smtp_username
+                
+                # Use sendmail with explicit envelope-from to match From header
+                # Prefer the actual sender email used in the header; fallback to SMTP username
+                envelope_from = actual_sender_email_used or smtp_username
+                if not envelope_from:
+                    envelope_from = smtp_username
+                try:
+                    server.sendmail(envelope_from, [to_email], msg.as_string())
+                    smtp_server_id = queue_item.get('smtp_server_id')
+                    smtp_server_name = queue_item.get('smtp_server_name', f'Server {smtp_server_id}')
+                    print(f"✓ Email sent successfully to {to_email}")
+                    print(f"   📧 Using SMTP Server: {smtp_server_name} (ID: {smtp_server_id})")
+                    print(f"   📤 From: {actual_sender_email_used}")
+                    # Log sent email details in IST
+                    self.log_sent_email(to_email, actual_sender_email_used, msg.get('Subject', ''))
+>>>>>>> 5cd6a8d (New version with the dashboard)
                 except smtplib.SMTPRecipientsRefused as e:
                     error_msg = f"Recipient refused: {str(e)}"
                     print(f"✗ {error_msg}")
@@ -369,6 +589,30 @@ class EmailSender:
                     'sender_email': campaign.get('sender_email', ''),
                     'html_content': campaign.get('html_content', '')
                 }
+<<<<<<< HEAD
+=======
+                # Get the actual sender email used (from queue item or campaign)
+                # Use the sender_email from campaign dict which already has the correct value from queue item
+                actual_sender_email_used = campaign.get('sender_email', '') or campaign_info.get('sender_email', '')
+                
+                # If still empty, extract from the email message's From header
+                if not actual_sender_email_used and msg:
+                    from_header = msg.get('From', '')
+                    if from_header:
+                        import re
+                        email_match = re.search(r'<([^>]+)>', from_header)
+                        if email_match:
+                            actual_sender_email_used = email_match.group(1)
+                        elif '@' in from_header:
+                            actual_sender_email_used = from_header.strip()
+                
+                # Final fallback to SMTP username
+                if not actual_sender_email_used:
+                    actual_sender_email_used = smtp_username
+                
+                print(f"   💾 Saving to sent_emails with sender_email: {actual_sender_email_used}")
+                
+>>>>>>> 5cd6a8d (New version with the dashboard)
                 self.mark_sent(
                     queue_item['queue_id'], 
                     queue_item['campaign_id'], 
@@ -376,7 +620,12 @@ class EmailSender:
                     email_message=msg,
                     recipient_info=recipient_info,
                     campaign_info=campaign_info,
+<<<<<<< HEAD
                     smtp_server_id=queue_item.get('smtp_server_id')
+=======
+                    smtp_server_id=queue_item.get('smtp_server_id'),
+                    sender_email=actual_sender_email_used  # Pass the actual sender email from queue item
+>>>>>>> 5cd6a8d (New version with the dashboard)
                 )
                 
             except smtplib.SMTPAuthenticationError as auth_error:
@@ -418,6 +667,7 @@ class EmailSender:
         msg = MIMEMultipart('mixed')  # Changed to 'mixed' to support attachments
         
         # Get sender information
+<<<<<<< HEAD
         sender_email = campaign.get('sender_email', '')
         sender_name = campaign.get('sender_name', '')
         smtp_username = smtp_config.get('username', '')
@@ -435,6 +685,66 @@ class EmailSender:
         else:
             msg['From'] = formataddr((sender_name, sender_email))
             msg['Reply-To'] = formataddr((sender_name, sender_email))
+=======
+        sender_email = campaign.get('sender_email', '').strip()
+        sender_name = campaign.get('sender_name', '').strip()
+        smtp_username = smtp_config.get('username', '').strip()
+        
+        # Debug logging
+        print(f"   🔍 DEBUG prepare_email:")
+        print(f"      Campaign sender_email: '{sender_email}'")
+        print(f"      Campaign sender_name: '{sender_name}'")
+        print(f"      SMTP username: '{smtp_username}'")
+        
+        # Priority for From address:
+        # 1. Campaign sender_email (from queue item - one of the 4 email IDs) - THIS IS WHAT USER WANTS TO SEE
+        # 2. SMTP username (for authentication compatibility)
+        # 3. Default fallback
+        
+        # Determine the actual sender email to use for From field
+        # Use the campaign sender_email (which comes from queue item's sender_email) if available
+        # This ensures the correct email ID (1, 2, 3, or 4) is shown in the From field
+        if sender_email and sender_email != '':
+            actual_sender_email = sender_email
+            print(f"      ✅ Using campaign sender_email: {actual_sender_email}")
+        elif smtp_username and smtp_username != '':
+            actual_sender_email = smtp_username
+            print(f"      ⚠ Campaign sender_email empty, using SMTP username: {actual_sender_email}")
+        else:
+            actual_sender_email = 'noreply@anaghasolution.com'
+            print(f"      ⚠ Both empty, using fallback: {actual_sender_email}")
+        
+        # If no sender name provided, use email username part
+        if not sender_name or sender_name == '':
+            if actual_sender_email:
+                sender_name = actual_sender_email.split('@')[0].replace('.', ' ').title()
+            else:
+                sender_name = 'Team Anagha'
+        
+        # CRITICAL: Ensure we never have an empty email address
+        if not actual_sender_email or actual_sender_email == '':
+            print(f"      ⚠ ERROR: actual_sender_email is still empty! Forcing to SMTP username or fallback.")
+            if smtp_username and smtp_username != '':
+                actual_sender_email = smtp_username
+            else:
+                actual_sender_email = 'noreply@anaghasolution.com'
+        
+        # Set From address - use the specified sender email (from queue item)
+        # This will show the correct email ID (1, 2, 3, or 4) in the From field
+        msg['From'] = formataddr((sender_name, actual_sender_email))
+        
+        # Set Reply-To to the same as From
+        msg['Reply-To'] = formataddr((sender_name, actual_sender_email))
+        
+        print(f"   📧 Final From: {sender_name} <{actual_sender_email}>")
+        
+        # Validate the From header is properly formatted
+        if '<>' in msg['From'] or msg['From'].endswith('<>'):
+            print(f"      ⚠ ERROR: From header is malformed: {msg['From']}")
+            # Fix it
+            msg['From'] = formataddr((sender_name, actual_sender_email))
+            print(f"      ✅ Fixed From header: {msg['From']}")
+>>>>>>> 5cd6a8d (New version with the dashboard)
         
         # Headers - use simple email format for To
         msg['To'] = recipient['email']
@@ -442,7 +752,17 @@ class EmailSender:
         
         # Add important headers to prevent bounces and spam
         msg['Message-ID'] = f"<{uuid.uuid4()}@anaghasolution.com>"
+<<<<<<< HEAD
         msg['Date'] = formatdate(localtime=True)
+=======
+        # Use IST date header explicitly
+        try:
+            tz_kolkata = pytz.timezone("Asia/Kolkata")
+            now_ist = datetime.now(tz_kolkata)
+            msg['Date'] = format_datetime(now_ist)
+        except Exception:
+            msg['Date'] = formatdate(localtime=True)
+>>>>>>> 5cd6a8d (New version with the dashboard)
         msg['MIME-Version'] = '1.0'
         msg['X-Mailer'] = 'ANAGHA SOLUTION Email Client v1.0'
         msg['X-Priority'] = '3'
@@ -788,12 +1108,39 @@ class EmailSender:
             import traceback
             traceback.print_exc()
     
+<<<<<<< HEAD
     def mark_sent(self, queue_id, campaign_id, recipient_id, email_message=None, recipient_info=None, campaign_info=None, smtp_server_id=None):
+=======
+    def mark_sent(self, queue_id, campaign_id, recipient_id, email_message=None, recipient_info=None, campaign_info=None, smtp_server_id=None, sender_email=None):
+>>>>>>> 5cd6a8d (New version with the dashboard)
         """Mark email as sent and save to sent_emails table"""
         conn = self.db.connect()
         cursor = conn.cursor()
         
+<<<<<<< HEAD
         now = datetime.now()
+=======
+        # Use Kolkata timezone for sent_at timestamp
+        try:
+            import pytz
+            kolkata_tz = pytz.timezone('Asia/Kolkata')
+            # Get current time in Kolkata timezone
+            now_kolkata = datetime.now(kolkata_tz)
+            # Convert to UTC for database storage (SQLite stores without timezone, so we store UTC)
+            # This ensures consistency - we always store UTC, then convert to IST when displaying
+            now_utc = now_kolkata.astimezone(pytz.UTC)
+            # Store as UTC datetime string for SQLite
+            now = now_utc.strftime('%Y-%m-%d %H:%M:%S')
+            print(f"   📅 Saving sent_at timestamp: UTC={now_utc.strftime('%Y-%m-%d %H:%M:%S %Z')} (IST={now_kolkata.strftime('%Y-%m-%d %H:%M:%S %Z')})")
+        except ImportError:
+            # Fallback if pytz is not available - use local time
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"   ⚠ pytz not available, using local time: {now}")
+        except Exception as tz_error:
+            # Fallback on any timezone error
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"   ⚠ Timezone error, using local time: {now} - {tz_error}")
+>>>>>>> 5cd6a8d (New version with the dashboard)
         
         # Get recipient and campaign info if not provided
         if not recipient_info:
@@ -857,6 +1204,7 @@ class EmailSender:
         recipient_name = f"{recipient_info.get('first_name', '')} {recipient_info.get('last_name', '')}".strip() if recipient_info else ''
         recipient_email = recipient_info.get('email', '') if recipient_info else ''
         
+<<<<<<< HEAD
         cursor.execute("""
             INSERT INTO sent_emails (
                 campaign_id, recipient_id, recipient_email, recipient_name,
@@ -871,6 +1219,85 @@ class EmailSender:
             html_content, text_content,
             now, 'sent', smtp_server_id, message_id
         ))
+=======
+        # Use the sender_email passed from queue item (priority), otherwise use campaign's sender_email
+        final_sender_email_for_db = sender_email if sender_email and sender_email.strip() else (campaign_info.get('sender_email', '') if campaign_info else '')
+        final_sender_name_for_db = campaign_info.get('sender_name', '') if campaign_info else ''
+        
+        # If sender_email is still empty, try to get from email_message
+        if not final_sender_email_for_db or not final_sender_email_for_db.strip():
+            if email_message:
+                try:
+                    # Try different ways to get From header
+                    from_header = None
+                    if hasattr(email_message, 'get'):
+                        from_header = email_message.get('From', '')
+                    elif hasattr(email_message, '__getitem__'):
+                        try:
+                            from_header = email_message['From']
+                        except:
+                            pass
+                    elif hasattr(email_message, 'get_all'):
+                        from_headers = email_message.get_all('From', [])
+                        if from_headers:
+                            from_header = from_headers[0]
+                    
+                    if from_header:
+                        print(f"   🔍 Found From header in email_message: {from_header}")
+                        # Extract email from "Name <email@domain.com>" format
+                        import re
+                        email_match = re.search(r'<([^>]+)>', str(from_header))
+                        if email_match:
+                            final_sender_email_for_db = email_match.group(1)
+                            print(f"   ✅ Extracted email from From header: {final_sender_email_for_db}")
+                        else:
+                            # If no angle brackets, use the whole string if it looks like an email
+                            from_str = str(from_header).strip()
+                            if '@' in from_str:
+                                final_sender_email_for_db = from_str
+                                print(f"   ✅ Using From header as email: {final_sender_email_for_db}")
+                except Exception as e:
+                    print(f"   ⚠ Error extracting From header: {e}")
+        
+        # Final validation - ensure we have a sender email
+        if not final_sender_email_for_db or not final_sender_email_for_db.strip():
+            print(f"   ⚠ WARNING: sender_email is still empty! Attempting to get from SMTP server...")
+            # Try to get from SMTP server if we have smtp_server_id
+            if smtp_server_id:
+                try:
+                    cursor.execute("SELECT username FROM smtp_servers WHERE id = ?", (smtp_server_id,))
+                    smtp_row = cursor.fetchone()
+                    if smtp_row and smtp_row[0]:
+                        final_sender_email_for_db = smtp_row[0]
+                        print(f"   ✅ Using SMTP server email: {final_sender_email_for_db}")
+                except Exception as e:
+                    print(f"   ⚠ Error getting SMTP server email: {e}")
+        
+        # Last resort fallback
+        if not final_sender_email_for_db or not final_sender_email_for_db.strip():
+            final_sender_email_for_db = 'noreply@anaghasolution.com'
+            print(f"   ⚠ Using fallback email: {final_sender_email_for_db}")
+        
+        print(f"   💾 Final sender_email for database: '{final_sender_email_for_db}'")
+        print(f"   💾 Final sender_name for database: '{final_sender_name_for_db}'")
+        
+        # Use db helper to insert sent email record
+        self.db.insert_sent_email(
+            campaign_id=campaign_id,
+            recipient_id=recipient_id,
+            recipient_email=recipient_email,
+            recipient_name=recipient_name,
+            subject=campaign_info.get('subject', '') if campaign_info else '',
+            sender_name=final_sender_name_for_db,
+            sender_email=final_sender_email_for_db,
+            html_content=html_content,
+            text_content=text_content,
+            sent_at=now,
+            status='sent',
+            smtp_server_id=smtp_server_id,
+            message_id=message_id
+        )
+>>>>>>> 5cd6a8d (New version with the dashboard)
         
         # Update queue
         cursor.execute("""

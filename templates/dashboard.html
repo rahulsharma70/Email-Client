@@ -3,8 +3,32 @@
 {% block title %}Dashboard - ANAGHA SOLUTION{% endblock %}
 
 {% block content %}
+<<<<<<< HEAD
 <div class="page-header">
     <h1><i class="fas fa-chart-line"></i> Dashboard</h1>
+=======
+<div class="page-header" style="display: flex; justify-content: space-between; align-items: center;">
+    <h1><i class="fas fa-chart-line"></i> Dashboard</h1>
+    <div class="email-control-panel" style="display: flex; gap: 10px; align-items: center;">
+        <div style="display: flex; gap: 5px; align-items: center; background: #ecf0f1; padding: 8px 15px; border-radius: 5px;">
+            <span id="sender-status" style="font-weight: bold; color: #7f8c8d; margin-right: 10px;">
+                <i class="fas fa-circle" style="font-size: 10px; color: #95a5a6;"></i> Status: <span id="status-text">Stopped</span>
+            </span>
+            <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; margin-right: 10px;">
+                <input type="radio" name="email-control" value="stop" id="control-stop" onchange="handleEmailControl('stop')">
+                <i class="fas fa-stop" style="color: #e74c3c;"></i> Stop
+            </label>
+            <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; margin-right: 10px;">
+                <input type="radio" name="email-control" value="pause" id="control-pause" onchange="handleEmailControl('pause')">
+                <i class="fas fa-pause" style="color: #f39c12;"></i> Pause
+            </label>
+            <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                <input type="radio" name="email-control" value="resume" id="control-resume" onchange="handleEmailControl('resume')">
+                <i class="fas fa-play" style="color: #27ae60;"></i> Resume
+            </label>
+        </div>
+    </div>
+>>>>>>> 5cd6a8d (New version with the dashboard)
 </div>
 
 <div class="stats-grid">
@@ -140,11 +164,117 @@ function updateCharts(stats) {
     });
 }
 
+<<<<<<< HEAD
 // Load stats on page load
 loadDashboardStats();
 
 // Auto-refresh every 5 seconds
 setInterval(loadDashboardStats, 5000);
+=======
+// Email Sending Control Functions
+async function loadSenderStatus() {
+    try {
+        const response = await axios.get('/api/email-sender/status');
+        const data = response.data;
+        updateSenderStatusUI(data);
+    } catch (error) {
+        console.error('Error loading sender status:', error);
+    }
+}
+
+function updateSenderStatusUI(data) {
+    const statusText = document.getElementById('status-text');
+    const statusIcon = document.querySelector('#sender-status i');
+    const stopRadio = document.getElementById('control-stop');
+    const pauseRadio = document.getElementById('control-pause');
+    const resumeRadio = document.getElementById('control-resume');
+    
+    // Update status text and icon color
+    const status = data.status || 'stopped';
+    statusText.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+    
+    // Update icon color based on status
+    if (status === 'sending') {
+        statusIcon.style.color = '#27ae60'; // Green
+        stopRadio.checked = false;
+        pauseRadio.checked = false;
+        resumeRadio.checked = false;
+    } else if (status === 'paused') {
+        statusIcon.style.color = '#f39c12'; // Orange
+        pauseRadio.checked = true;
+    } else {
+        statusIcon.style.color = '#e74c3c'; // Red
+        stopRadio.checked = true;
+    }
+}
+
+async function handleEmailControl(action) {
+    try {
+        let endpoint = '';
+        let message = '';
+        
+        switch(action) {
+            case 'stop':
+                endpoint = '/api/email-sender/stop';
+                message = 'Stopping email sending...';
+                break;
+            case 'pause':
+                endpoint = '/api/email-sender/pause';
+                message = 'Pausing email sending...';
+                break;
+            case 'resume':
+                endpoint = '/api/email-sender/resume';
+                message = 'Resuming email sending...';
+                break;
+            default:
+                return;
+        }
+        
+        showAlert(message, 'info');
+        
+        const response = await axios.post(endpoint);
+        
+        if (response.data.success) {
+            showAlert(response.data.message, 'success');
+            // Reload status after a short delay
+            setTimeout(loadSenderStatus, 500);
+        } else {
+            showAlert(response.data.error || 'Operation failed', 'error');
+            // Reload status to reset UI
+            setTimeout(loadSenderStatus, 500);
+        }
+    } catch (error) {
+        let errorMsg = 'Operation failed';
+        if (error.response) {
+            // Server responded with error
+            if (error.response.data && error.response.data.error) {
+                errorMsg = error.response.data.error;
+            } else if (error.response.status === 404) {
+                errorMsg = 'API endpoint not found. Please refresh the page.';
+            } else {
+                errorMsg = `Server error: ${error.response.status}`;
+            }
+        } else if (error.request) {
+            // Request made but no response
+            errorMsg = 'No response from server. Please check your connection.';
+        } else {
+            errorMsg = error.message || 'Operation failed';
+        }
+        showAlert('Error: ' + errorMsg, 'error');
+        console.error('Email control error:', error);
+        // Reload status to reset UI
+        setTimeout(loadSenderStatus, 500);
+    }
+}
+
+// Load stats on page load
+loadDashboardStats();
+loadSenderStatus();
+
+// Auto-refresh every 5 seconds
+setInterval(loadDashboardStats, 5000);
+setInterval(loadSenderStatus, 3000); // Check status every 3 seconds
+>>>>>>> 5cd6a8d (New version with the dashboard)
 </script>
 {% endblock %}
 
