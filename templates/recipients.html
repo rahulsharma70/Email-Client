@@ -108,8 +108,6 @@
 document.getElementById('importForm').addEventListener('submit', async function(e) {
     e.preventDefault();
     
-<<<<<<< HEAD
-=======
     const fileInput = document.querySelector('input[type="file"]');
     const file = fileInput.files[0];
     
@@ -118,82 +116,43 @@ document.getElementById('importForm').addEventListener('submit', async function(
         return;
     }
     
-    // Check file size (max 50MB)
-    const maxSize = 50 * 1024 * 1024; // 50MB
-    if (file.size > maxSize) {
-        showAlert('File is too large. Maximum size is 50MB. Please use a smaller file.', 'error');
-        return;
-    }
-    
-    // Show loading indicator
+    const formData = new FormData(e.target);
     const submitBtn = e.target.querySelector('button[type="submit"]');
     const originalBtnText = submitBtn.innerHTML;
     submitBtn.disabled = true;
     submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Importing...';
     
->>>>>>> 5cd6a8d (New version with the dashboard)
-    const formData = new FormData(e.target);
-    
     try {
         const response = await axios.post('/api/recipients/import', formData, {
             headers: {
                 'Content-Type': 'multipart/form-data'
-<<<<<<< HEAD
-            }
-        });
-        
-        showAlert(`Successfully imported ${response.data.count} recipients!`, 'success');
-        setTimeout(() => {
-            refreshRecipients();
-        }, 1500);
-    } catch (error) {
-        showAlert('Error importing: ' + (error.response?.data?.error || error.message), 'error');
-=======
             },
-            timeout: 300000, // 5 minutes timeout for large files
-            onUploadProgress: function(progressEvent) {
-                if (progressEvent.total) {
-                    const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-                    submitBtn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Uploading... ${percentCompleted}%`;
-                }
-            }
+            timeout: 300000 // 5 minutes timeout for large files
         });
-        
-        submitBtn.innerHTML = originalBtnText;
-        submitBtn.disabled = false;
         
         if (response.data.success) {
             showAlert(`Successfully imported ${response.data.count} recipients!`, 'success');
+            e.target.reset(); // Reset form
             setTimeout(() => {
                 refreshRecipients();
             }, 1500);
-            // Reset form
-            e.target.reset();
         } else {
             showAlert('Import failed: ' + (response.data.error || 'Unknown error'), 'error');
         }
     } catch (error) {
-        submitBtn.innerHTML = originalBtnText;
-        submitBtn.disabled = false;
-        
-        let errorMessage = 'Error importing: ';
-        
-        if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-            errorMessage += 'Request timed out. The file might be too large. Please try a smaller file or split it into multiple files.';
-        } else if (error.response) {
-            // Server responded with error
-            errorMessage += error.response.data?.error || error.response.statusText || 'Server error';
+        let errorMsg = 'Error importing: ';
+        if (error.response) {
+            errorMsg += error.response.data?.error || error.response.statusText || 'Server error';
         } else if (error.request) {
-            // Request made but no response
-            errorMessage += 'Network error. Please check your connection and try again.';
+            errorMsg += 'Network error. Please check your connection.';
         } else {
-            // Something else happened
-            errorMessage += error.message || 'Unknown error';
+            errorMsg += error.message || 'Unknown error';
         }
-        
+        showAlert(errorMsg, 'error');
         console.error('Import error:', error);
-        showAlert(errorMessage, 'error');
->>>>>>> 5cd6a8d (New version with the dashboard)
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = originalBtnText;
     }
 });
 
@@ -270,14 +229,33 @@ function confirmDeleteAll() {
 }
 
 async function deleteAllRecipients() {
+    const deleteBtn = document.querySelector('button[onclick="confirmDeleteAll()"]');
+    const originalBtnText = deleteBtn.innerHTML;
+    deleteBtn.disabled = true;
+    deleteBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Deleting...';
+    
     try {
         const response = await axios.delete('/api/recipients/delete/all');
         if (response.data.success) {
-            showAlert(`Successfully deleted all recipients!`, 'success');
+            showAlert(`Successfully deleted ${response.data.deleted_count || 'all'} recipients!`, 'success');
             refreshRecipients();
+        } else {
+            showAlert('Delete failed: ' + (response.data.error || 'Unknown error'), 'error');
         }
     } catch (error) {
-        showAlert('Error deleting all recipients: ' + (error.response?.data?.error || error.message), 'error');
+        let errorMsg = 'Error deleting all recipients: ';
+        if (error.response) {
+            errorMsg += error.response.data?.error || error.response.statusText || 'Server error';
+        } else if (error.request) {
+            errorMsg += 'Network error. Please check your connection.';
+        } else {
+            errorMsg += error.message || 'Unknown error';
+        }
+        showAlert(errorMsg, 'error');
+        console.error('Delete all error:', error);
+    } finally {
+        deleteBtn.disabled = false;
+        deleteBtn.innerHTML = originalBtnText;
     }
 }
 

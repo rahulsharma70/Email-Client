@@ -3,10 +3,6 @@
 {% block title %}Dashboard - ANAGHA SOLUTION{% endblock %}
 
 {% block content %}
-<<<<<<< HEAD
-<div class="page-header">
-    <h1><i class="fas fa-chart-line"></i> Dashboard</h1>
-=======
 <div class="page-header" style="display: flex; justify-content: space-between; align-items: center;">
     <h1><i class="fas fa-chart-line"></i> Dashboard</h1>
     <div class="email-control-panel" style="display: flex; gap: 10px; align-items: center;">
@@ -28,7 +24,6 @@
             </label>
         </div>
     </div>
->>>>>>> 5cd6a8d (New version with the dashboard)
 </div>
 
 <div class="stats-grid">
@@ -164,13 +159,6 @@ function updateCharts(stats) {
     });
 }
 
-<<<<<<< HEAD
-// Load stats on page load
-loadDashboardStats();
-
-// Auto-refresh every 5 seconds
-setInterval(loadDashboardStats, 5000);
-=======
 // Email Sending Control Functions
 async function loadSenderStatus() {
     try {
@@ -274,7 +262,6 @@ loadSenderStatus();
 // Auto-refresh every 5 seconds
 setInterval(loadDashboardStats, 5000);
 setInterval(loadSenderStatus, 3000); // Check status every 3 seconds
->>>>>>> 5cd6a8d (New version with the dashboard)
 </script>
 {% endblock %}
 

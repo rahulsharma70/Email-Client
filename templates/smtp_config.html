@@ -1,16 +1,5 @@
 {% extends "base.html" %}
 
-<<<<<<< HEAD
-{% block title %}SMTP Configuration - ANAGHA SOLUTION{% endblock %}
-
-{% block content %}
-<div class="page-header">
-    <h1><i class="fas fa-cog"></i> SMTP Configuration</h1>
-</div>
-
-<div class="form-container">
-    <h2>Add New SMTP Server</h2>
-=======
 {% block title %}Email Accounts - ANAGHA SOLUTION{% endblock %}
 
 {% block content %}
@@ -21,7 +10,6 @@
 
 <div class="form-container">
     <h2><i class="fas fa-plus-circle"></i> Add New Email Account</h2>
->>>>>>> 5cd6a8d (New version with the dashboard)
     <form id="smtpForm">
         <div class="form-group">
             <label>Server Name *</label>
@@ -66,18 +54,6 @@
         </div>
         
         <hr style="margin: 20px 0; border: 1px solid #ddd;">
-<<<<<<< HEAD
-        <h3 style="margin: 15px 0 10px 0; color: #2c3e50;">IMAP Settings (Save to Sent Folder)</h3>
-        <p style="color: #7f8c8d; font-size: 12px; margin-bottom: 15px;">
-            Configure IMAP to save sent emails to your webmail Sent folder. 
-            Usually same as SMTP host but with "mail." prefix or "imap." prefix.
-        </p>
-        
-        <div class="form-group">
-            <label>IMAP Host (e.g., mail.secureserver.net or imap.secureserver.net)</label>
-            <input type="text" name="imap_host" placeholder="mail.secureserver.net">
-            <small style="color: #7f8c8d;">Leave empty to disable saving to Sent folder</small>
-=======
         <h3 style="margin: 15px 0 10px 0; color: #667eea;"><i class="fas fa-inbox"></i> IMAP Settings (Incoming Mail & Sent Folder)</h3>
         <p style="color: #7f8c8d; font-size: 12px; margin-bottom: 15px;">
             Configure IMAP to receive incoming emails and save sent emails to your webmail.
@@ -88,7 +64,6 @@
             <label>IMAP Host *</label>
             <input type="text" name="imap_host" placeholder="imap.secureserver.net">
             <small style="color: #7f8c8d;">Common: imap.gmail.com, imap.secureserver.net, mail.yourdomain.com</small>
->>>>>>> 5cd6a8d (New version with the dashboard)
         </div>
         
         <div class="form-group">
@@ -103,15 +78,12 @@
             </label>
         </div>
         
-<<<<<<< HEAD
-=======
         <div class="form-group">
             <button type="button" class="btn btn-info" onclick="testIMAPConnection()">
                 <i class="fas fa-plug"></i> Test IMAP Connection
             </button>
         </div>
         
->>>>>>> 5cd6a8d (New version with the dashboard)
         <hr style="margin: 20px 0; border: 1px solid #ddd;">
         
         <div class="form-group">
@@ -287,9 +259,6 @@ document.getElementById('smtpForm').addEventListener('submit', async function(e)
     }
     
     try {
-<<<<<<< HEAD
-        const response = await axios.post('/api/smtp/add', data);
-=======
         // Show loading message
         const submitBtn = document.querySelector('button[type="submit"]');
         const originalText = submitBtn.innerHTML;
@@ -302,18 +271,12 @@ document.getElementById('smtpForm').addEventListener('submit', async function(e)
             }
         });
         
->>>>>>> 5cd6a8d (New version with the dashboard)
         if (response.data.success) {
             showAlert('SMTP server added successfully!', 'success');
             clearForm();
             setTimeout(() => {
                 refreshServers();
             }, 500);
-<<<<<<< HEAD
-        }
-    } catch (error) {
-        showAlert('Error adding SMTP: ' + (error.response?.data?.error || error.message), 'error');
-=======
         } else {
             showAlert('Failed to add SMTP server: ' + (response.data.error || 'Unknown error'), 'error');
         }
@@ -339,7 +302,6 @@ document.getElementById('smtpForm').addEventListener('submit', async function(e)
         
         showAlert('Error adding SMTP: ' + errorMsg, 'error');
         console.error('SMTP add error:', error);
->>>>>>> 5cd6a8d (New version with the dashboard)
     }
 });
 
@@ -461,8 +423,6 @@ async function loadSMTPConfig(serverId) {
     }
 }
 
-<<<<<<< HEAD
-=======
 async function testIMAPConnection() {
     const form = document.getElementById('smtpForm');
     const formData = new FormData(form);
@@ -490,7 +450,6 @@ async function testIMAPConnection() {
     }
 }
 
->>>>>>> 5cd6a8d (New version with the dashboard)
 async function refreshServers() {
     try {
         const response = await axios.get('/api/smtp/list');

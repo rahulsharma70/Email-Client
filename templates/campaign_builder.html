@@ -25,37 +25,8 @@
         </div>
         
         <div class="form-group">
-<<<<<<< HEAD
             <label>Sender Email *</label>
             <input type="email" name="sender_email" required>
-=======
-            <label>Sender Email IDs (All 4 will be used - 20 emails per ID) *</label>
-            <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; border: 1px solid #dee2e6;">
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-                    <label style="margin: 0; min-width: 100px; font-weight: 500;">Email ID 1:</label>
-                    <input type="email" name="sender_email_1" id="senderEmailInput1" placeholder="email1@example.com" style="flex: 1; padding: 8px;" required>
-                    <small style="color: #7f8c8d; font-size: 12px;">→ SMTP Server 1 (20 emails)</small>
-                </div>
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-                    <label style="margin: 0; min-width: 100px; font-weight: 500;">Email ID 2:</label>
-                    <input type="email" name="sender_email_2" id="senderEmailInput2" placeholder="email2@example.com" style="flex: 1; padding: 8px;" required>
-                    <small style="color: #7f8c8d; font-size: 12px;">→ SMTP Server 2 (20 emails)</small>
-                </div>
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-                    <label style="margin: 0; min-width: 100px; font-weight: 500;">Email ID 3:</label>
-                    <input type="email" name="sender_email_3" id="senderEmailInput3" placeholder="email3@example.com" style="flex: 1; padding: 8px;" required>
-                    <small style="color: #7f8c8d; font-size: 12px;">→ SMTP Server 3 (20 emails)</small>
-                </div>
-                <div style="display: flex; align-items: center; gap: 10px;">
-                    <label style="margin: 0; min-width: 100px; font-weight: 500;">Email ID 4:</label>
-                    <input type="email" name="sender_email_4" id="senderEmailInput4" placeholder="email4@example.com" style="flex: 1; padding: 8px;" required>
-                    <small style="color: #7f8c8d; font-size: 12px;">→ SMTP Server 4 (20 emails)</small>
-                </div>
-            </div>
-            <small style="color: #7f8c8d; display: block; margin-top: 5px;">
-                💡 All 4 email IDs are required. Each will send 20 emails through its corresponding SMTP server. If left empty, will use the SMTP account's email automatically.
-            </small>
->>>>>>> 5cd6a8d (New version with the dashboard)
         </div>
         
         <div class="form-group">
@@ -87,10 +58,6 @@
         </div>
         
         <div class="form-group" id="htmlContentGroup" style="display: none;">
-<<<<<<< HEAD
-            <label>HTML Content *</label>
-            <textarea name="html_content" id="htmlContent" rows="10" placeholder="Enter HTML content or use merge tags: {name}, {email}, {company}, {city}"></textarea>
-=======
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
                 <label style="margin: 0;">HTML Content *</label>
                 <button type="button" class="btn btn-info" onclick="saveAsTemplate()" style="padding: 5px 15px; font-size: 12px;">
@@ -101,7 +68,6 @@
             <small style="color: #7f8c8d; display: block; margin-top: 5px;">
                 💡 Tip: Your template will be auto-saved as you design it. Or click "Save as Template" to save manually.
             </small>
->>>>>>> 5cd6a8d (New version with the dashboard)
         </div>
         
         <div class="form-group">
@@ -114,8 +80,6 @@
         </div>
         
         <div class="form-group">
-<<<<<<< HEAD
-=======
             <label>Select SMTP Servers (Select exactly 4 servers) *</label>
             <div id="smtpServersList" style="background: #f8f9fa; padding: 15px; border-radius: 5px; border: 1px solid #dee2e6;">
                 <div style="display: flex; align-items: center; margin-bottom: 10px;">
@@ -132,7 +96,6 @@
         </div>
         
         <div class="form-group">
->>>>>>> 5cd6a8d (New version with the dashboard)
             <label>
                 <input type="checkbox" name="send_now" id="sendNowCheckbox" checked> Send immediately after creating
             </label>
@@ -141,14 +104,6 @@
             </small>
         </div>
         
-<<<<<<< HEAD
-        <button type="submit" class="btn btn-success">
-            <i class="fas fa-paper-plane"></i> Create & Send Campaign
-        </button>
-        <button type="button" class="btn btn-secondary" onclick="saveDraft()">
-            <i class="fas fa-save"></i> Save as Draft
-        </button>
-=======
         <div style="display: flex; gap: 10px; margin-top: 20px;">
             <button type="submit" class="btn btn-success">
                 <i class="fas fa-paper-plane"></i> Create & Send Campaign
@@ -160,7 +115,6 @@
                 <i class="fas fa-file-code"></i> Save as Template
             </button>
         </div>
->>>>>>> 5cd6a8d (New version with the dashboard)
     </form>
 </div>
 {% endblock %}
@@ -173,58 +127,6 @@ let templatesData = {};
 templatesData[{{ template.id }}] = {{ template.html_content|tojson }};
 {% endfor %}
 
-<<<<<<< HEAD
-=======
-// Auto-populate email IDs from selected SMTP servers
-function autoPopulateEmailIds() {
-    if (selectedSmtpServers.length === 0) {
-        // Clear email IDs if no servers selected
-        for (let i = 1; i <= 4; i++) {
-            const emailInput = document.getElementById(`senderEmailInput${i}`);
-            if (emailInput) {
-                emailInput.value = '';
-            }
-        }
-        return;
-    }
-    
-    // Load SMTP server details to get usernames
-    axios.get('/api/smtp/list').then(response => {
-        if (response.data.success) {
-            const servers = response.data.servers;
-            // Sort selected servers by their order in selectedSmtpServers array
-            const selectedServers = selectedSmtpServers.map(id => 
-                servers.find(s => s.id === id)
-            ).filter(s => s); // Remove undefined
-            
-            // Populate email ID inputs with SMTP server usernames
-            selectedServers.forEach((server, index) => {
-                const emailIndex = index + 1;
-                if (emailIndex <= 4 && server) {
-                    const emailInput = document.getElementById(`senderEmailInput${emailIndex}`);
-                    if (emailInput) {
-                        // Only auto-populate if field is empty
-                        if (!emailInput.value.trim()) {
-                            emailInput.value = server.username || '';
-                        }
-                    }
-                }
-            });
-            
-            // Clear remaining email ID fields if less than 4 servers selected
-            for (let i = selectedServers.length + 1; i <= 4; i++) {
-                const emailInput = document.getElementById(`senderEmailInput${i}`);
-                if (emailInput) {
-                    emailInput.value = '';
-                }
-            }
-        }
-    }).catch(error => {
-        console.error('Error loading SMTP servers for auto-populate:', error);
-    });
-}
-
->>>>>>> 5cd6a8d (New version with the dashboard)
 function loadSelectedTemplate() {
     const templateSelect = document.getElementById('templateSelect');
     const templateId = templateSelect.value;
@@ -250,8 +152,6 @@ function loadSelectedTemplate() {
     showAlert('Template loaded successfully!', 'success');
 }
 
-<<<<<<< HEAD
-=======
 // Auto-save timer for templates
 let autoSaveTimer = null;
 let lastSavedContent = '';
@@ -327,7 +227,6 @@ function toggleSmtpServer(serverId, isChecked, checkboxElement) {
     
     updateSelectedCount();
     updateCheckboxStyles();
-    autoPopulateEmailIds(); // Auto-populate email IDs from selected SMTP servers
 }
 
 function updateSelectedCount() {
@@ -359,34 +258,25 @@ function updateCheckboxStyles() {
 // Load SMTP servers when page loads
 loadSmtpServers();
 
->>>>>>> 5cd6a8d (New version with the dashboard)
 function toggleMessageEditor() {
     const messageType = document.getElementById('messageType').value;
     const textGroup = document.getElementById('textContentGroup');
     const htmlGroup = document.getElementById('htmlContentGroup');
     const textContent = document.getElementById('textContent');
     const htmlContent = document.getElementById('htmlContent');
-<<<<<<< HEAD
-=======
     const saveTemplateBtn = document.getElementById('saveTemplateBtn');
->>>>>>> 5cd6a8d (New version with the dashboard)
     
     if (messageType === 'text') {
         textGroup.style.display = 'block';
         htmlGroup.style.display = 'none';
         textContent.required = true;
         htmlContent.required = false;
-<<<<<<< HEAD
-=======
         saveTemplateBtn.style.display = 'none';
->>>>>>> 5cd6a8d (New version with the dashboard)
     } else {
         textGroup.style.display = 'none';
         htmlGroup.style.display = 'block';
         textContent.required = false;
         htmlContent.required = true;
-<<<<<<< HEAD
-=======
         saveTemplateBtn.style.display = 'inline-block';
     }
 }
@@ -496,7 +386,6 @@ async function saveAsTemplate() {
         const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
         showAlert('Error saving template: ' + errorMsg, 'error');
         console.error('Template save error:', error);
->>>>>>> 5cd6a8d (New version with the dashboard)
     }
 }
 
@@ -528,65 +417,26 @@ document.getElementById('attachments').addEventListener('change', function(e) {
 document.getElementById('campaignForm').addEventListener('submit', async function(e) {
     e.preventDefault();
     
-<<<<<<< HEAD
-=======
     // Validate SMTP server selection (only if sending now)
     const sendNow = document.getElementById('sendNowCheckbox').checked;
-    if (sendNow && selectedSmtpServers.length < 1) {
-        showAlert(`Please select at least 1 SMTP server before sending.`, 'error');
+    if (sendNow && selectedSmtpServers.length !== MAX_SELECTED_SERVERS) {
+        showAlert(`Please select exactly ${MAX_SELECTED_SERVERS} SMTP servers before sending.`, 'error');
         document.getElementById('smtpSelectionError').textContent = 
-            `Please select at least 1 SMTP server.`;
+            `Please select exactly ${MAX_SELECTED_SERVERS} SMTP servers.`;
         return;
     }
     
-    // Validate that all 4 email IDs are provided (if sending now and SMTP servers are selected)
-    if (sendNow && selectedSmtpServers.length > 0) {
-        const senderEmail1 = document.getElementById('senderEmailInput1').value.trim();
-        const senderEmail2 = document.getElementById('senderEmailInput2').value.trim();
-        const senderEmail3 = document.getElementById('senderEmailInput3').value.trim();
-        const senderEmail4 = document.getElementById('senderEmailInput4').value.trim();
-        
-        // Check if at least the number of selected SMTP servers have email IDs
-        const emailIds = [senderEmail1, senderEmail2, senderEmail3, senderEmail4].filter(e => e);
-        if (emailIds.length < selectedSmtpServers.length) {
-            showAlert(`Please enter email IDs for all ${selectedSmtpServers.length} selected SMTP servers. Each server will send 20 emails using its corresponding email ID.`, 'error');
-            return;
-        }
-    }
-    
->>>>>>> 5cd6a8d (New version with the dashboard)
     const formData = new FormData(e.target);
     const messageType = formData.get('message_type') || 'text';
     
     // Create FormData for file upload (axios will set Content-Type automatically)
     const uploadFormData = new FormData();
     
-<<<<<<< HEAD
-=======
-    // Get all 4 sender email IDs (all are required)
-    const senderEmail1 = formData.get('sender_email_1') || '';
-    const senderEmail2 = formData.get('sender_email_2') || '';
-    const senderEmail3 = formData.get('sender_email_3') || '';
-    const senderEmail4 = formData.get('sender_email_4') || '';
-    
-    // Validate that all 4 email IDs are provided (or can be empty to use SMTP account emails)
-    // Note: We allow empty to use SMTP account emails automatically
-    
->>>>>>> 5cd6a8d (New version with the dashboard)
     // Add all form fields
     uploadFormData.append('name', formData.get('name'));
     uploadFormData.append('subject', formData.get('subject'));
     uploadFormData.append('sender_name', formData.get('sender_name'));
-<<<<<<< HEAD
     uploadFormData.append('sender_email', formData.get('sender_email'));
-=======
-    uploadFormData.append('sender_email', ''); // Main sender email (can be empty)
-    // Send all 4 email IDs - each will be mapped to its corresponding SMTP server
-    uploadFormData.append('sender_email_1', senderEmail1);
-    uploadFormData.append('sender_email_2', senderEmail2);
-    uploadFormData.append('sender_email_3', senderEmail3);
-    uploadFormData.append('sender_email_4', senderEmail4);
->>>>>>> 5cd6a8d (New version with the dashboard)
     uploadFormData.append('message_type', messageType);
     
     if (messageType === 'text') {
@@ -595,10 +445,6 @@ document.getElementById('campaignForm').addEventListener('submit', async functio
         uploadFormData.append('html_content', formData.get('html_content') || '');
     }
     
-<<<<<<< HEAD
-    // Get send_now checkbox value
-    const sendNow = document.getElementById('sendNowCheckbox').checked;
-=======
     // Add selected SMTP servers
     if (selectedSmtpServers.length > 0) {
         selectedSmtpServers.forEach(serverId => {
@@ -607,7 +453,6 @@ document.getElementById('campaignForm').addEventListener('submit', async functio
     }
     
     // Get send_now checkbox value
->>>>>>> 5cd6a8d (New version with the dashboard)
     uploadFormData.append('send_now', sendNow ? 'on' : '');
     
     // Add attachments
@@ -634,13 +479,10 @@ document.getElementById('campaignForm').addEventListener('submit', async functio
             document.getElementById('attachmentList').innerHTML = '';
             document.getElementById('messageType').value = 'text';
             toggleMessageEditor();
-<<<<<<< HEAD
-=======
             // Reset SMTP selection
             selectedSmtpServers = [];
             updateSelectedCount();
             loadSmtpServers(); // Reload to reset checkboxes
->>>>>>> 5cd6a8d (New version with the dashboard)
         }
     } catch (error) {
         const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
@@ -654,29 +496,11 @@ function saveDraft() {
     const formData = new FormData(form);
     const messageType = formData.get('message_type') || 'text';
     
-<<<<<<< HEAD
-=======
-    // Get selected sender email ID
-    const selectedEmailOption = document.querySelector('input[name="sender_email_option"]:checked');
-    let selectedSenderEmail = '';
-    if (selectedEmailOption) {
-        const emailIndex = selectedEmailOption.value;
-        const emailInput = document.getElementById(`senderEmailInput${emailIndex}`);
-        if (emailInput && emailInput.value.trim()) {
-            selectedSenderEmail = emailInput.value.trim();
-        }
-    }
-    
->>>>>>> 5cd6a8d (New version with the dashboard)
     const uploadFormData = new FormData();
     uploadFormData.append('name', formData.get('name'));
     uploadFormData.append('subject', formData.get('subject'));
     uploadFormData.append('sender_name', formData.get('sender_name'));
-<<<<<<< HEAD
     uploadFormData.append('sender_email', formData.get('sender_email'));
-=======
-    uploadFormData.append('sender_email', selectedSenderEmail); // Use selected email ID
->>>>>>> 5cd6a8d (New version with the dashboard)
     uploadFormData.append('message_type', messageType);
     
     if (messageType === 'text') {

@@ -9,9 +9,6 @@ from datetime import datetime
 from typing import List, Dict, Optional
 
 class DatabaseManager:
-<<<<<<< HEAD
-    def __init__(self, db_path: str = "anagha_solution.db"):
-=======
     def __init__(self, db_path: str = None):
         # Use absolute path to ensure database persists regardless of working directory
         if db_path is None:
@@ -24,7 +21,6 @@ class DatabaseManager:
                 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                 db_path = os.path.join(base_dir, db_path)
         
->>>>>>> 5cd6a8d (New version with the dashboard)
         self.db_path = db_path
         self.conn = None
         
@@ -80,8 +76,6 @@ class DatabaseManager:
         except sqlite3.OperationalError:
             pass  # Column already exists
         
-<<<<<<< HEAD
-=======
         # Add POP3 columns if they don't exist
         try:
             cursor.execute("ALTER TABLE smtp_servers ADD COLUMN pop3_host TEXT")
@@ -104,7 +98,6 @@ class DatabaseManager:
         except sqlite3.OperationalError:
             pass
         
->>>>>>> 5cd6a8d (New version with the dashboard)
         # Email Campaigns table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS campaigns (
@@ -175,10 +168,6 @@ class DatabaseManager:
                 campaign_id INTEGER,
                 recipient_id INTEGER,
                 smtp_server_id INTEGER,
-<<<<<<< HEAD
-=======
-                sender_email TEXT,
->>>>>>> 5cd6a8d (New version with the dashboard)
                 priority INTEGER DEFAULT 5,
                 status TEXT DEFAULT 'pending',
                 attempts INTEGER DEFAULT 0,
@@ -191,15 +180,6 @@ class DatabaseManager:
             )
         """)
         
-<<<<<<< HEAD
-=======
-        # Add sender_email column if it doesn't exist (for existing databases)
-        try:
-            cursor.execute("ALTER TABLE email_queue ADD COLUMN sender_email TEXT")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        
->>>>>>> 5cd6a8d (New version with the dashboard)
         # Tracking table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS tracking (
@@ -266,18 +246,6 @@ class DatabaseManager:
                 FOREIGN KEY (smtp_server_id) REFERENCES smtp_servers(id)
             )
         """)
-<<<<<<< HEAD
-=======
-        # Safety migration: add sender_email/sender_name if legacy DB missing them
-        try:
-            cursor.execute("ALTER TABLE sent_emails ADD COLUMN sender_email TEXT")
-        except:
-            pass
-        try:
-            cursor.execute("ALTER TABLE sent_emails ADD COLUMN sender_name TEXT")
-        except:
-            pass
->>>>>>> 5cd6a8d (New version with the dashboard)
         
         # Create index for faster queries
         try:
@@ -287,8 +255,6 @@ class DatabaseManager:
         except:
             pass
         
-<<<<<<< HEAD
-=======
         # Settings table - stores application settings
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS app_settings (
@@ -298,34 +264,6 @@ class DatabaseManager:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # Fetched Emails table - stores emails fetched from IMAP/POP3 locally
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS fetched_emails (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account_id INTEGER NOT NULL,
-                email_uid TEXT NOT NULL,
-                folder TEXT NOT NULL,
-                subject TEXT,
-                from_addr TEXT,
-                to_addr TEXT,
-                date TEXT,
-                body TEXT,
-                html_body TEXT,
-                unread INTEGER DEFAULT 1,
-                protocol TEXT DEFAULT 'imap',
-                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(account_id, email_uid, folder, protocol),
-                FOREIGN KEY (account_id) REFERENCES smtp_servers(id)
-            )
-        """)
-        
-        # Create index for faster queries
-        try:
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_fetched_emails_account ON fetched_emails(account_id, folder)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_fetched_emails_uid ON fetched_emails(account_id, email_uid, folder, protocol)")
-        except:
-            pass
         
         # Insert default settings if not exist
         cursor.execute("""
@@ -341,7 +279,6 @@ class DatabaseManager:
             VALUES ('email_priority', '5')
         """)
         
->>>>>>> 5cd6a8d (New version with the dashboard)
         conn.commit()
         return conn
     
@@ -395,16 +332,11 @@ class DatabaseManager:
     def add_smtp_server(self, name: str, host: str, port: int, username: str, 
                        password: str, use_tls: bool = True, use_ssl: bool = False, 
                        max_per_hour: int = 100, imap_host: str = None, 
-<<<<<<< HEAD
-                       imap_port: int = 993, save_to_sent: bool = True):
-        """Add a new SMTP server"""
-=======
                        imap_port: int = 993, save_to_sent: bool = True,
                        pop3_host: str = None, pop3_port: int = 995,
                        pop3_ssl: bool = True, pop3_leave_on_server: bool = True,
                        incoming_protocol: str = 'imap'):
         """Add a new SMTP server with IMAP and POP3 settings"""
->>>>>>> 5cd6a8d (New version with the dashboard)
         conn = self.connect()
         cursor = conn.cursor()
         
@@ -415,19 +347,12 @@ class DatabaseManager:
         
         cursor.execute("""
             INSERT INTO smtp_servers (name, host, port, username, password, use_tls, use_ssl, 
-<<<<<<< HEAD
-                                     max_per_hour, is_default, imap_host, imap_port, save_to_sent)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (name, host, port, username, password, 1 if use_tls else 0, 1 if use_ssl else 0, 
-              max_per_hour, is_default, imap_host, imap_port, 1 if save_to_sent else 0))
-=======
                                      max_per_hour, is_default, imap_host, imap_port, save_to_sent,
                                      pop3_host, pop3_port, pop3_ssl, pop3_leave_on_server, incoming_protocol)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (name, host, port, username, password, 1 if use_tls else 0, 1 if use_ssl else 0, 
               max_per_hour, is_default, imap_host, imap_port, 1 if save_to_sent else 0,
               pop3_host, pop3_port, 1 if pop3_ssl else 0, 1 if pop3_leave_on_server else 0, incoming_protocol))
->>>>>>> 5cd6a8d (New version with the dashboard)
         conn.commit()
         return cursor.lastrowid
     
@@ -482,20 +407,11 @@ class DatabaseManager:
         return None
     
     def create_campaign(self, name: str, subject: str, sender_name: str, 
-<<<<<<< HEAD
                        sender_email: str, reply_to: str = None, html_content: str = "",
-=======
-                       sender_email: str = None, reply_to: str = None, html_content: str = "",
->>>>>>> 5cd6a8d (New version with the dashboard)
                        template_id: int = None) -> int:
         """Create a new email campaign"""
         conn = self.connect()
         cursor = conn.cursor()
-<<<<<<< HEAD
-=======
-        # Allow sender_email to be None or empty - will use SMTP account email
-        sender_email = sender_email or ''
->>>>>>> 5cd6a8d (New version with the dashboard)
         cursor.execute("""
             INSERT INTO campaigns (name, subject, sender_name, sender_email, reply_to, html_content, template_id)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -551,52 +467,8 @@ class DatabaseManager:
         cursor.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
     
-<<<<<<< HEAD
-    def add_to_queue(self, campaign_id: int, recipient_ids: List[int], smtp_server_id: int = None):
-        """Add emails to sending queue"""
-        conn = self.connect()
-        cursor = conn.cursor()
-        added_count = 0
-        for recipient_id in recipient_ids:
-            try:
-                # Check if recipient is unsubscribed
-                cursor.execute("SELECT is_unsubscribed FROM recipients WHERE id = ?", (recipient_id,))
-                recipient = cursor.fetchone()
-                if recipient and recipient[0]:
-                    continue  # Skip unsubscribed recipients
-                
-                cursor.execute("""
-                    INSERT OR IGNORE INTO campaign_recipients (campaign_id, recipient_id)
-                    VALUES (?, ?)
-                """, (campaign_id, recipient_id))
-                
-                # CRITICAL: Check if this email is already in queue to prevent duplicates
-                cursor.execute("""
-                    SELECT id FROM email_queue 
-                    WHERE campaign_id = ? AND recipient_id = ? AND status IN ('pending', 'processing')
-                """, (campaign_id, recipient_id))
-                existing = cursor.fetchone()
-                
-                if existing:
-                    # Already in queue, skip
-                    continue
-                
-                cursor.execute("""
-                    INSERT INTO email_queue (campaign_id, recipient_id, smtp_server_id, status)
-                    VALUES (?, ?, ?, 'pending')
-                """, (campaign_id, recipient_id, smtp_server_id))
-                added_count += 1
-            except Exception as e:
-                print(f"Error adding recipient {recipient_id} to queue: {e}")
-                continue
-        conn.commit()
-        print(f"Added {added_count} emails to queue for campaign {campaign_id}")
-        return added_count
-    
-=======
     def add_to_queue(self, campaign_id: int, recipient_ids: List[int], smtp_server_id: int = None, 
-                     emails_per_server: int = 20, selected_smtp_servers: List[int] = None,
-                     sender_emails_map: Dict[int, str] = None):
+                     emails_per_server: int = 20, selected_smtp_servers: List[int] = None):
         """
         Add emails to sending queue with round-robin SMTP distribution
         
@@ -636,15 +508,10 @@ class DatabaseManager:
                     if existing:
                         continue
                     
-                    # Get sender email for this SMTP server from mapping
-                    sender_email_for_queue = None
-                    if sender_emails_map and smtp_server_id in sender_emails_map:
-                        sender_email_for_queue = sender_emails_map[smtp_server_id]
-                    
                     cursor.execute("""
-                        INSERT INTO email_queue (campaign_id, recipient_id, smtp_server_id, sender_email, status)
-                        VALUES (?, ?, ?, ?, 'pending')
-                    """, (campaign_id, recipient_id, smtp_server_id, sender_email_for_queue))
+                        INSERT INTO email_queue (campaign_id, recipient_id, smtp_server_id, status)
+                        VALUES (?, ?, ?, 'pending')
+                    """, (campaign_id, recipient_id, smtp_server_id))
                     added_count += 1
                 except Exception as e:
                     print(f"Error adding recipient {recipient_id} to queue: {e}")
@@ -726,53 +593,25 @@ class DatabaseManager:
                         continue
                     
                     # Calculate which SMTP server to use (round-robin)
-                    # Formula: server_index = (email_index // emails_per_server) % num_servers
-                    # This ensures each server gets exactly emails_per_server emails before moving to next
+                    # Server index = (email_index // emails_per_server) % num_servers
                     server_index = (index // emails_per_server) % len(smtp_servers)
                     assigned_smtp_id = smtp_servers[server_index]
-                    
-                    # Get sender email for this SMTP server from mapping
-                    # Map: Email ID 1 → SMTP Server 1, Email ID 2 → SMTP Server 2, etc.
-                    sender_email_for_queue = None
-                    if sender_emails_map:
-                        # Map server_index (0-based) to sender email
-                        # If we have 4 email IDs, map: 0→email1, 1→email2, 2→email3, 3→email4
-                        if server_index < len(smtp_servers) and assigned_smtp_id in sender_emails_map:
-                            sender_email_for_queue = sender_emails_map[assigned_smtp_id]
-                        elif server_index < len(smtp_servers):
-                            # Try to get by index if direct mapping not available
-                            email_keys = sorted(sender_emails_map.keys())
-                            if server_index < len(email_keys):
-                                sender_email_for_queue = sender_emails_map[email_keys[server_index]]
                     
                     # Debug: Log assignment for verification (first 5, last 5, and every 20th)
                     if index < 5 or index >= len(recipient_ids_to_process) - 5 or (index + 1) % 20 == 0:
                         server_name = self._get_smtp_server_name(conn, assigned_smtp_id)
-                        sender_info = f" (sender: {sender_email_for_queue or 'SMTP account email'})"
-                        print(f"   📧 Email {index + 1}/{len(recipient_ids_to_process)}: Server index {server_index} → SMTP Server {assigned_smtp_id} ({server_name}){sender_info}")
+                        print(f"   📧 Email {index + 1}/{len(recipient_ids_to_process)}: Server index {server_index} → SMTP Server {assigned_smtp_id} ({server_name})")
                     
                     # Verify assignment before inserting
                     if assigned_smtp_id not in smtp_servers:
                         print(f"   ⚠ ERROR: Assigned SMTP ID {assigned_smtp_id} not in available servers {smtp_servers}!")
                         continue
                     
-                    # CRITICAL: Ensure smtp_server_id is not None before inserting
-                    if assigned_smtp_id is None:
-                        print(f"   ⚠ ERROR: Cannot insert email {index + 1} - SMTP server ID is None!")
-                        print(f"   Available servers: {smtp_servers}")
-                        print(f"   Server index calculated: {server_index}")
-                        print(f"   Total servers: {len(smtp_servers)}")
-                        continue
-                    
                     cursor.execute("""
-                        INSERT INTO email_queue (campaign_id, recipient_id, smtp_server_id, sender_email, status)
-                        VALUES (?, ?, ?, ?, 'pending')
-                    """, (campaign_id, recipient_id, assigned_smtp_id, sender_email_for_queue))
+                        INSERT INTO email_queue (campaign_id, recipient_id, smtp_server_id, status)
+                        VALUES (?, ?, ?, 'pending')
+                    """, (campaign_id, recipient_id, assigned_smtp_id))
                     added_count += 1
-                    
-                    # Verify the insert was successful
-                    if cursor.rowcount == 0:
-                        print(f"   ⚠ WARNING: Failed to insert email {index + 1} into queue")
                     
                 except Exception as e:
                     print(f"Error adding recipient {recipient_id} to queue: {e}")
@@ -792,28 +631,16 @@ class DatabaseManager:
             """, (campaign_id,))
             distribution = cursor.fetchall()
             if distribution:
-                print("\n" + "="*60)
-                print("📊 EMAIL DISTRIBUTION SUMMARY")
-                print("="*60)
+                print("\n📊 Email Distribution Summary:")
                 total_distributed = 0
                 for smtp_id, count in distribution:
                     server_name = self._get_smtp_server_name(conn, smtp_id)
-                    print(f"   ✅ Server {smtp_id} ({server_name}): {count} emails")
+                    print(f"   Server {smtp_id} ({server_name}): {count} emails")
                     total_distributed += count
                     # Verify each server has exactly emails_per_server emails
                     if count != emails_per_server:
                         print(f"   ⚠ Warning: Server {smtp_id} has {count} emails, expected {emails_per_server}")
-                print(f"   📧 Total: {total_distributed} emails distributed across {len(distribution)} servers")
-                print("="*60)
-                
-                # Verify distribution is correct
-                if len(distribution) > 0:
-                    expected_per_server = emails_per_server
-                    all_correct = all(count == expected_per_server for _, count in distribution)
-                    if all_correct:
-                        print(f"   ✓ Distribution verified: All servers have exactly {expected_per_server} emails")
-                    else:
-                        print(f"   ⚠ Distribution issue: Some servers don't have {expected_per_server} emails")
+                print(f"   Total: {total_distributed} emails distributed across {len(distribution)} servers")
         
         return added_count
     
@@ -827,7 +654,6 @@ class DatabaseManager:
         except:
             return f"Server {smtp_id}"
     
->>>>>>> 5cd6a8d (New version with the dashboard)
     def get_queue_stats(self) -> Dict:
         """Get queue statistics"""
         conn = self.connect()
@@ -914,8 +740,6 @@ class DatabaseManager:
         """, (email.lower().strip(),))
         conn.commit()
     
-<<<<<<< HEAD
-=======
     def get_setting(self, key: str, default: str = None) -> str:
         """Get a setting value"""
         conn = self.connect()
@@ -953,116 +777,7 @@ class DatabaseManager:
             return int(delay)
         except:
             return 30
-
-    def insert_sent_email(self, campaign_id: int, recipient_id: int, recipient_email: str,
-                          recipient_name: str, subject: str, sender_name: str, sender_email: str,
-                          html_content: str, text_content: str, sent_at, status: str,
-                          smtp_server_id: int = None, message_id: str = None):
-        """Insert a sent email record."""
-        conn = self.connect()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO sent_emails (
-                    campaign_id, recipient_id, recipient_email, recipient_name,
-                    subject, sender_name, sender_email, html_content, text_content,
-                    sent_at, status, smtp_server_id, message_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                campaign_id, recipient_id, recipient_email, recipient_name,
-                subject, sender_name, sender_email, html_content, text_content,
-                sent_at, status, smtp_server_id, message_id
-            ))
-            conn.commit()
-            return cursor.lastrowid
-        except Exception as e:
-            print(f"Error inserting sent email: {e}")
-            import traceback; traceback.print_exc()
-            conn.rollback()
-            return None
     
-    def save_fetched_email(self, account_id: int, email_uid: str, folder: str, 
-                          subject: str, from_addr: str, to_addr: str, date: str,
-                          body: str = '', html_body: str = '', unread: bool = True,
-                          protocol: str = 'imap'):
-        """Save a fetched email to local database"""
-        conn = self.connect()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT OR REPLACE INTO fetched_emails 
-                (account_id, email_uid, folder, subject, from_addr, to_addr, date, 
-                 body, html_body, unread, protocol, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, (account_id, email_uid, folder, subject, from_addr, to_addr, date,
-                  body, html_body, 1 if unread else 0, protocol))
-            conn.commit()
-            return True
-        except Exception as e:
-            print(f"Error saving fetched email: {e}")
-            return False
-    
-    def get_stored_emails(self, account_id: int, folder: str, protocol: str = 'imap') -> List[Dict]:
-        """Get stored emails for an account and folder"""
-        conn = self.connect()
-        cursor = conn.cursor()
-        # Get all stored emails - sorting will be done in Python for better date parsing
-        cursor.execute("""
-            SELECT email_uid, subject, from_addr, to_addr, date, body, html_body, unread
-            FROM fetched_emails
-            WHERE account_id = ? AND folder = ? AND protocol = ?
-        """, (account_id, folder, protocol))
-        emails = []
-        for row in cursor.fetchall():
-            emails.append({
-                'uid': row[0],
-                'subject': row[1] or '(No Subject)',
-                'from': row[2] or 'Unknown',
-                'to': row[3] or '',
-                'date': row[4] or '',
-                'body': row[5] or '',
-                'html': row[6] or '',
-                'unread': bool(row[7])
-            })
-        return emails
-    
-    def get_stored_email_uids(self, account_id: int, folder: str, protocol: str = 'imap') -> set:
-        """Get set of stored email UIDs for an account and folder"""
-        conn = self.connect()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT email_uid FROM fetched_emails
-            WHERE account_id = ? AND folder = ? AND protocol = ?
-        """, (account_id, folder, protocol))
-        return {row[0] for row in cursor.fetchall()}
-    
-    def update_fetched_email_body(self, account_id: int, email_uid: str, folder: str,
-                                   body: str, html_body: str, protocol: str = 'imap'):
-        """Update email body for a stored email"""
-        conn = self.connect()
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE fetched_emails
-            SET body = ?, html_body = ?
-            WHERE account_id = ? AND email_uid = ? AND folder = ? AND protocol = ?
-        """, (body, html_body, account_id, email_uid, folder, protocol))
-        conn.commit()
-    
-    def get_stored_email_body(self, account_id: int, email_uid: str, folder: str, 
-                              protocol: str = 'imap') -> Dict:
-        """Get stored email body"""
-        conn = self.connect()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT body, html_body FROM fetched_emails
-            WHERE account_id = ? AND email_uid = ? AND folder = ? AND protocol = ?
-        """, (account_id, email_uid, folder, protocol))
-        row = cursor.fetchone()
-        if row:
-            return {'body': row[0] or '', 'html': row[1] or ''}
-        return {'body': '', 'html': ''}
-    
->>>>>>> 5cd6a8d (New version with the dashboard)
     def close(self):
         """Close database connection"""
         if self.conn:
