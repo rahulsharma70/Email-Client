@@ -165,6 +165,14 @@ def api_login():
                 }
             })
         else:
+            # Check if it's an email verification error
+            if result.get('email_verified') == False:
+                return jsonify({
+                    'error': result.get('error', 'Email not verified'),
+                    'email_verified': False,
+                    'message': 'Please verify your email before logging in.',
+                    'email': email  # Include email for resend functionality
+                }), 403
             return jsonify({'error': result.get('error', 'Login failed')}), 401
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -181,6 +189,13 @@ def api_get_current_user(user_id):
         if user:
             # Don't return sensitive info
             user.pop('password_hash', None)
+            
+            # Add onboarding status
+            from core.onboarding import OnboardingManager
+            onboarding_mgr = OnboardingManager(db)
+            onboarding_status = onboarding_mgr.get_onboarding_status(user_id)
+            user['onboarding'] = onboarding_status
+            
             return jsonify({'success': True, 'user': user})
         else:
             return jsonify({'success': False, 'error': 'User not found'}), 404
@@ -206,10 +221,662 @@ def api_change_password(user_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/')
-def index():
-    """Dashboard page"""
+@app.route('/api/auth/verify-email', methods=['GET', 'POST'])
+def api_verify_email():
+    """Verify email using token"""
     try:
+        from core.email_verification import EmailVerificationManager
+        
+        email_verification = EmailVerificationManager(db)
+        
+        if request.method == 'GET':
+            # GET request - show verification page
+            token = request.args.get('token', '')
+            if not token:
+                return render_template('verify_email.html', 
+                                     success=False, 
+                                     error='No verification token provided')
+            
+            result = email_verification.verify_email_token(token)
+            
+            if result.get('success'):
+                return render_template('verify_email.html', 
+                                     success=True, 
+                                     message='Email verified successfully! You can now log in.')
+            else:
+                return render_template('verify_email.html', 
+                                     success=False, 
+                                     error=result.get('error', 'Verification failed'))
+        else:
+            # POST request - API endpoint
+            data = request.json if request.is_json else request.form.to_dict()
+            token = data.get('token', '')
+            
+            if not token:
+                return jsonify({'success': False, 'error': 'Token is required'}), 400
+            
+            result = email_verification.verify_email_token(token)
+            
+            if result.get('success'):
+                return jsonify({
+                    'success': True,
+                    'message': 'Email verified successfully',
+                    'user_id': result.get('user_id')
+                })
+            else:
+                return jsonify(result), 400
+                
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/auth/resend-verification', methods=['POST'])
+def api_resend_verification():
+    """Resend verification email"""
+    try:
+        from core.email_verification import EmailVerificationManager
+        
+        data = request.json if request.is_json else request.form.to_dict()
+        email = data.get('email', '').strip()
+        
+        if not email:
+            return jsonify({'success': False, 'error': 'Email is required'}), 400
+        
+        email_verification = EmailVerificationManager(db)
+        result = email_verification.resend_verification_email(email)
+        
+        if result.get('success'):
+            return jsonify({
+                'success': True,
+                'message': 'Verification email sent. Please check your inbox.'
+            })
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/verify-email')
+def verify_email_page():
+    """Email verification page"""
+    token = request.args.get('token', '')
+    return render_template('verify_email.html', token=token)
+
+# Billing & Stripe Routes
+@app.route('/api/billing/create-checkout-session', methods=['POST'])
+@require_auth
+def api_create_checkout_session(user_id):
+    """Create Stripe Checkout Session"""
+    try:
+        data = request.json if request.is_json else request.form.to_dict()
+        plan_id = data.get('plan_id', '').strip()
+        
+        if not plan_id:
+            return jsonify({'success': False, 'error': 'Plan ID is required'}), 400
+        
+        # Validate plan
+        if plan_id not in billing_manager.PLANS:
+            return jsonify({'success': False, 'error': 'Invalid plan'}), 400
+        
+        # Get app URL for redirects
+        from core.config import Config
+        app_url = Config.get('APP_URL', request.host_url.rstrip('/'))
+        success_url = f"{app_url}/checkout/success?session_id={{CHECKOUT_SESSION_ID}}"
+        cancel_url = f"{app_url}/checkout/cancel"
+        
+        result = billing_manager.create_checkout_session(user_id, plan_id, success_url, cancel_url)
+        
+        if result.get('success'):
+            return jsonify({
+                'success': True,
+                'checkout_url': result['checkout_url'],
+                'session_id': result['session_id']
+            })
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/checkout/success')
+def checkout_success():
+    """Stripe checkout success page"""
+    session_id = request.args.get('session_id', '')
+    return render_template('checkout_success.html', session_id=session_id)
+
+@app.route('/checkout/cancel')
+def checkout_cancel():
+    """Stripe checkout cancel page"""
+    return render_template('checkout_cancel.html')
+
+@app.route('/api/webhooks/stripe', methods=['POST'])
+def api_stripe_webhook():
+    """
+    Stripe webhook handler
+    Verifies webhook signature and handles events
+    """
+    import stripe
+    from core.config import Config
+    
+    # Ensure Stripe is initialized
+    if not stripe.api_key:
+        stripe.api_key = os.getenv('STRIPE_SECRET_KEY', '')
+    
+    payload = request.get_data()
+    sig_header = request.headers.get('Stripe-Signature')
+    webhook_secret = os.getenv('STRIPE_WEBHOOK_SECRET', '')
+    
+    if not webhook_secret:
+        print("⚠️ STRIPE_WEBHOOK_SECRET not configured")
+        return jsonify({'error': 'Webhook secret not configured'}), 500
+    
+    try:
+        # Verify webhook signature
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, webhook_secret
+        )
+    except ValueError as e:
+        print(f"⚠️ Invalid payload: {e}")
+        return jsonify({'error': 'Invalid payload'}), 400
+    except stripe.error.SignatureVerificationError as e:
+        print(f"⚠️ Invalid signature: {e}")
+        return jsonify({'error': 'Invalid signature'}), 400
+    
+    # Handle the event
+    event_type = event['type']
+    event_data = event['data']['object']
+    
+    print(f"📥 Stripe webhook received: {event_type}")
+    
+    try:
+        if event_type == 'checkout.session.completed':
+            handle_checkout_session_completed(event_data)
+        elif event_type == 'customer.subscription.created':
+            handle_subscription_created(event_data)
+        elif event_type == 'customer.subscription.updated':
+            handle_subscription_updated(event_data)
+        elif event_type == 'customer.subscription.deleted':
+            handle_subscription_deleted(event_data)
+        elif event_type == 'invoice.payment_succeeded':
+            handle_invoice_payment_succeeded(event_data)
+        elif event_type == 'invoice.payment_failed':
+            handle_invoice_payment_failed(event_data)
+        else:
+            print(f"ℹ️ Unhandled event type: {event_type}")
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        import traceback
+        print(f"❌ Error handling webhook event {event_type}: {e}")
+        traceback.print_exc()
+        # Return 200 to prevent Stripe from retrying (we'll handle retries manually)
+        return jsonify({'error': str(e)}), 200
+
+def handle_checkout_session_completed(session):
+    """Handle checkout.session.completed event"""
+    try:
+        user_id = int(session['metadata'].get('user_id', 0))
+        plan_id = session['metadata'].get('plan_id', '')
+        
+        if not user_id or not plan_id:
+            print(f"⚠️ Missing metadata in checkout session: {session.get('id')}")
+            return
+        
+        print(f"✅ Checkout completed for user {user_id}, plan {plan_id}")
+        
+        # Update user subscription
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            db.supabase.client.table('users').update({
+                'subscription_plan': plan_id,
+                'subscription_status': 'active',
+                'stripe_subscription_id': session.get('subscription')
+            }).eq('id', user_id).execute()
+        else:
+            cursor.execute("""
+                UPDATE users
+                SET subscription_plan = ?,
+                    subscription_status = 'active',
+                    stripe_subscription_id = ?
+                WHERE id = ?
+            """, (plan_id, session.get('subscription'), user_id))
+            conn.commit()
+        
+        # Activate account
+        activate_account_after_payment(user_id, plan_id)
+        
+    except Exception as e:
+        import traceback
+        print(f"❌ Error in handle_checkout_session_completed: {e}")
+        traceback.print_exc()
+        raise
+
+def handle_subscription_created(subscription):
+    """Handle customer.subscription.created event"""
+    try:
+        customer_id = subscription['customer']
+        plan_id = subscription['metadata'].get('plan_id', '')
+        user_id = subscription['metadata'].get('user_id', '')
+        
+        if not user_id:
+            # Try to get user_id from customer metadata
+            import stripe
+            customer = stripe.Customer.retrieve(customer_id)
+            user_id = customer.metadata.get('user_id', '')
+        
+        if not user_id:
+            print(f"⚠️ Could not find user_id for subscription: {subscription.get('id')}")
+            return
+        
+        user_id = int(user_id)
+        
+        print(f"✅ Subscription created for user {user_id}, plan {plan_id}")
+        
+        # Update user subscription
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            db.supabase.client.table('users').update({
+                'subscription_plan': plan_id,
+                'subscription_status': subscription['status'],
+                'stripe_subscription_id': subscription['id']
+            }).eq('id', user_id).execute()
+        else:
+            cursor.execute("""
+                UPDATE users
+                SET subscription_plan = ?,
+                    subscription_status = ?,
+                    stripe_subscription_id = ?
+                WHERE id = ?
+            """, (plan_id, subscription['status'], subscription['id'], user_id))
+            conn.commit()
+        
+        # Activate account if status is active
+        if subscription['status'] == 'active':
+            activate_account_after_payment(user_id, plan_id)
+        
+    except Exception as e:
+        import traceback
+        print(f"❌ Error in handle_subscription_created: {e}")
+        traceback.print_exc()
+        raise
+
+def handle_subscription_updated(subscription):
+    """Handle customer.subscription.updated event"""
+    try:
+        customer_id = subscription['customer']
+        plan_id = subscription['metadata'].get('plan_id', '')
+        user_id = subscription['metadata'].get('user_id', '')
+        
+        if not user_id:
+            import stripe
+            customer = stripe.Customer.retrieve(customer_id)
+            user_id = customer.metadata.get('user_id', '')
+        
+        if not user_id:
+            # Try to find by subscription_id
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            if hasattr(db, 'use_supabase') and db.use_supabase:
+                result = db.supabase.client.table('users').select('id').eq('stripe_subscription_id', subscription['id']).execute()
+                if result.data and len(result.data) > 0:
+                    user_id = result.data[0]['id']
+            else:
+                cursor.execute("SELECT id FROM users WHERE stripe_subscription_id = ?", (subscription['id'],))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row[0]
+        
+        if not user_id:
+            print(f"⚠️ Could not find user_id for subscription: {subscription.get('id')}")
+            return
+        
+        user_id = int(user_id)
+        
+        # Get plan from subscription items if not in metadata
+        if not plan_id:
+            items = subscription.get('items', {}).get('data', [])
+            if items and len(items) > 0:
+                price_id = items[0].get('price', {}).get('id', '')
+                # Map price_id to plan_id (you may need to adjust this)
+                for p_id, plan in billing_manager.PLANS.items():
+                    if plan.get('stripe_price_id') == price_id:
+                        plan_id = p_id
+                        break
+        
+        print(f"✅ Subscription updated for user {user_id}, status: {subscription['status']}")
+        
+        # Update user subscription
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            update_data = {
+                'subscription_status': subscription['status']
+            }
+            if plan_id:
+                update_data['subscription_plan'] = plan_id
+            
+            db.supabase.client.table('users').update(update_data).eq('id', user_id).execute()
+        else:
+            if plan_id:
+                cursor.execute("""
+                    UPDATE users
+                    SET subscription_plan = ?,
+                        subscription_status = ?
+                    WHERE id = ?
+                """, (plan_id, subscription['status'], user_id))
+            else:
+                cursor.execute("""
+                    UPDATE users
+                    SET subscription_status = ?
+                    WHERE id = ?
+                """, (subscription['status'], user_id))
+            conn.commit()
+        
+        # Handle status changes
+        if subscription['status'] == 'active':
+            # Ensure account is activated
+            activate_account_after_payment(user_id, plan_id or 'free')
+        elif subscription['status'] in ['canceled', 'unpaid', 'past_due']:
+            # Deactivate or downgrade
+            deactivate_account(user_id)
+        
+    except Exception as e:
+        import traceback
+        print(f"❌ Error in handle_subscription_updated: {e}")
+        traceback.print_exc()
+        raise
+
+def handle_subscription_deleted(subscription):
+    """Handle customer.subscription.deleted event"""
+    try:
+        customer_id = subscription['customer']
+        user_id = subscription['metadata'].get('user_id', '')
+        
+        if not user_id:
+            import stripe
+            customer = stripe.Customer.retrieve(customer_id)
+            user_id = customer.metadata.get('user_id', '')
+        
+        if not user_id:
+            # Find by subscription_id
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            if hasattr(db, 'use_supabase') and db.use_supabase:
+                result = db.supabase.client.table('users').select('id').eq('stripe_subscription_id', subscription['id']).execute()
+                if result.data and len(result.data) > 0:
+                    user_id = result.data[0]['id']
+            else:
+                cursor.execute("SELECT id FROM users WHERE stripe_subscription_id = ?", (subscription['id'],))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row[0]
+        
+        if not user_id:
+            print(f"⚠️ Could not find user_id for deleted subscription: {subscription.get('id')}")
+            return
+        
+        user_id = int(user_id)
+        
+        print(f"✅ Subscription deleted for user {user_id}")
+        
+        # Deactivate account
+        deactivate_account(user_id)
+        
+    except Exception as e:
+        import traceback
+        print(f"❌ Error in handle_subscription_deleted: {e}")
+        traceback.print_exc()
+        raise
+
+def handle_invoice_payment_succeeded(invoice):
+    """Handle invoice.payment_succeeded event"""
+    try:
+        subscription_id = invoice.get('subscription')
+        if not subscription_id:
+            return
+        
+        # Find user by subscription_id
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            result = db.supabase.client.table('users').select('id').eq('stripe_subscription_id', subscription_id).execute()
+            if result.data and len(result.data) > 0:
+                user_id = result.data[0]['id']
+            else:
+                return
+        else:
+            cursor.execute("SELECT id FROM users WHERE stripe_subscription_id = ?", (subscription_id,))
+            row = cursor.fetchone()
+            if not row:
+                return
+            user_id = row[0]
+        
+        print(f"✅ Invoice payment succeeded for user {user_id}")
+        
+        # Ensure subscription is active
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            db.supabase.client.table('users').update({
+                'subscription_status': 'active'
+            }).eq('id', user_id).execute()
+        else:
+            cursor.execute("""
+                UPDATE users
+                SET subscription_status = 'active'
+                WHERE id = ?
+            """, (user_id,))
+            conn.commit()
+        
+    except Exception as e:
+        import traceback
+        print(f"❌ Error in handle_invoice_payment_succeeded: {e}")
+        traceback.print_exc()
+        raise
+
+def handle_invoice_payment_failed(invoice):
+    """Handle invoice.payment_failed event"""
+    try:
+        subscription_id = invoice.get('subscription')
+        if not subscription_id:
+            return
+        
+        # Find user by subscription_id
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            result = db.supabase.client.table('users').select('id').eq('stripe_subscription_id', subscription_id).execute()
+            if result.data and len(result.data) > 0:
+                user_id = result.data[0]['id']
+            else:
+                return
+        else:
+            cursor.execute("SELECT id FROM users WHERE stripe_subscription_id = ?", (subscription_id,))
+            row = cursor.fetchone()
+            if not row:
+                return
+            user_id = row[0]
+        
+        print(f"⚠️ Invoice payment failed for user {user_id}")
+        
+        # Update subscription status
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            db.supabase.client.table('users').update({
+                'subscription_status': 'past_due'
+            }).eq('id', user_id).execute()
+        else:
+            cursor.execute("""
+                UPDATE users
+                SET subscription_status = 'past_due'
+                WHERE id = ?
+            """, (user_id,))
+            conn.commit()
+        
+        # TODO: Send notification email to user
+        
+    except Exception as e:
+        import traceback
+        print(f"❌ Error in handle_invoice_payment_failed: {e}")
+        traceback.print_exc()
+        raise
+
+def activate_account_after_payment(user_id, plan_id):
+    """
+    Activate account after successful payment
+    Creates tenant, assigns plan, records quotas, enables dashboard access
+    """
+    try:
+        from core.quota_manager import QuotaManager
+        from core.email_verification import EmailVerificationManager
+        import secrets
+        
+        quota_manager = QuotaManager(db)
+        email_verification = EmailVerificationManager(db)
+        
+        print(f"🔧 Activating account for user {user_id}, plan {plan_id}")
+        
+        # Get user info
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            result = db.supabase.client.table('users').select(
+                'id, email, first_name, last_name'
+            ).eq('id', user_id).execute()
+            
+            if not result.data or len(result.data) == 0:
+                print(f"⚠️ User {user_id} not found")
+                return
+            
+            user = result.data[0]
+            email = user['email']
+        else:
+            cursor.execute("SELECT email, first_name, last_name FROM users WHERE id = ?", (user_id,))
+            row = cursor.fetchone()
+            if not row:
+                print(f"⚠️ User {user_id} not found")
+                return
+            email = row[0]
+        
+        # Generate one-time password
+        one_time_password = secrets.token_urlsafe(12)
+        
+        # Initialize usage counters
+        usage_counters = [
+            ('emails_sent_this_month', 0),
+            ('leads_scraped_this_month', 0),
+            ('llm_tokens_used_this_month', 0),
+            ('campaigns_created_this_month', 0),
+        ]
+        
+        # Get plan limits
+        plan_limits = quota_manager.PLAN_LIMITS.get(plan_id, quota_manager.PLAN_LIMITS['start'])
+        
+        # Update user account
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            db.supabase.client.table('users').update({
+                'is_active': 1,
+                'subscription_plan': plan_id,
+                'subscription_status': 'active',
+                'one_time_password': one_time_password
+            }).eq('id', user_id).execute()
+        else:
+            cursor.execute("""
+                UPDATE users
+                SET is_active = 1,
+                    subscription_plan = ?,
+                    subscription_status = 'active',
+                    one_time_password = ?,
+                    account_activated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (plan_id, one_time_password, user_id))
+            conn.commit()
+        
+        # Create usage counter records
+        for counter_type, initial_value in usage_counters:
+            try:
+                if hasattr(db, 'use_supabase') and db.use_supabase:
+                    # Check if counter exists
+                    result = db.supabase.client.table('usage_counters').select('id').eq('user_id', user_id).eq('counter_type', counter_type).execute()
+                    if not result.data or len(result.data) == 0:
+                        db.supabase.client.table('usage_counters').insert({
+                            'user_id': user_id,
+                            'counter_type': counter_type,
+                            'current_value': initial_value,
+                            'reset_date': datetime.now().date().isoformat()
+                        }).execute()
+                else:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO usage_counters (user_id, counter_type, current_value, reset_date)
+                        VALUES (?, ?, ?, ?)
+                    """, (user_id, counter_type, initial_value, datetime.now().date()))
+                    conn.commit()
+            except Exception as e:
+                print(f"⚠️ Error creating usage counter {counter_type}: {e}")
+        
+        print(f"✅ Account activated for user {user_id}")
+        
+        # TODO: Send access email with credentials
+        # email_verification.send_access_email(email, one_time_password, user_id)
+        
+    except Exception as e:
+        import traceback
+        print(f"❌ Error in activate_account_after_payment: {e}")
+        traceback.print_exc()
+        raise
+
+def deactivate_account(user_id):
+    """Deactivate account and downgrade to free plan"""
+    try:
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            db.supabase.client.table('users').update({
+                'subscription_plan': 'free',
+                'subscription_status': 'canceled'
+            }).eq('id', user_id).execute()
+        else:
+            cursor.execute("""
+                UPDATE users
+                SET subscription_plan = 'free',
+                    subscription_status = 'canceled'
+                WHERE id = ?
+            """, (user_id,))
+            conn.commit()
+        
+        print(f"✅ Account deactivated for user {user_id}")
+        
+    except Exception as e:
+        import traceback
+        print(f"❌ Error in deactivate_account: {e}")
+        traceback.print_exc()
+        raise
+
+@app.route('/')
+@optional_auth
+def index(user_id):
+    """Dashboard page - redirects to onboarding if needed"""
+    try:
+        if user_id:
+            from core.onboarding import OnboardingManager
+            onboarding_mgr = OnboardingManager(db)
+            
+            if onboarding_mgr.should_show_onboarding(user_id):
+                return redirect('/onboarding')
+        
         return render_template('dashboard.html')
     except Exception as e:
         return f"Error loading dashboard: {str(e)}", 500
@@ -334,6 +1001,16 @@ def api_fetch_inbox(account_id):
         imap_port = int(account.get('imap_port', 993))
         username = account.get('username', '')
         password = account.get('password', '')
+        
+        # Decrypt password if encrypted
+        if password:
+            try:
+                from core.encryption import get_encryption_manager
+                encryptor = get_encryption_manager()
+                password = encryptor.decrypt(password)
+            except:
+                # If decryption fails, might be plaintext from old data
+                pass
         
         if not imap_host or not username or not password:
             return jsonify({'error': 'IMAP settings not configured for this account'}), 400
@@ -1543,6 +2220,11 @@ def api_create_campaign(user_id):
         
         # Check if personalization is enabled
         use_personalization = data.get('use_personalization') == 'on' or data.get('use_personalization') == True
+        personalization_prompt = data.get('personalization_prompt', '').strip() if use_personalization else None
+        
+        # Validate: if personalization is enabled, prompt is required
+        if use_personalization and not personalization_prompt:
+            return jsonify({'error': 'Personalization prompt is required when AI personalization is enabled'}), 400
         
         # Create campaign first to get ID
         campaign_id = db.create_campaign(
@@ -1554,7 +2236,8 @@ def api_create_campaign(user_id):
             html_content=html_content,
             template_id=data.get('template_id'),
             use_personalization=use_personalization,
-            user_id=user_id
+            user_id=user_id,
+            personalization_prompt=personalization_prompt
         )
         
         # Save attachments if any
@@ -2355,12 +3038,16 @@ def api_update_smtp(server_id):
                 update_data['username'] = data['username']
             if 'password' in data and data['password']:
                 import urllib.parse
+                from core.encryption import get_encryption_manager
+                encryptor = get_encryption_manager()
+                
                 password = data['password']
                 try:
                     password = urllib.parse.unquote(password)
                 except:
                     pass
-                update_data['password'] = password
+                # Encrypt password before storing
+                update_data['password'] = encryptor.encrypt(password)
             if 'use_ssl' in data:
                 use_ssl = data['use_ssl']
                 if isinstance(use_ssl, str):
@@ -2434,13 +3121,18 @@ def api_update_smtp(server_id):
                 params.append(data['username'])
             if 'password' in data and data['password']:
                 import urllib.parse
+                from core.encryption import get_encryption_manager
+                encryptor = get_encryption_manager()
+                
                 password = data['password']
                 try:
                     password = urllib.parse.unquote(password)
                 except:
                     pass
+                # Encrypt password before storing
+                encrypted_password = encryptor.encrypt(password)
                 updates.append("password = ?")
-                params.append(password)
+                params.append(encrypted_password)
             if 'use_ssl' in data:
                 use_ssl = data['use_ssl']
                 if isinstance(use_ssl, str):
@@ -2595,14 +3287,23 @@ def api_set_default_smtp(server_id):
 
 @app.route('/api/smtp/get/<int:server_id>', methods=['GET'])
 def api_get_smtp(server_id):
-    """Get SMTP server configuration"""
+    """Get SMTP server configuration with decrypted password"""
     try:
+        from core.encryption import get_encryption_manager
+        encryptor = get_encryption_manager()
+        
         # Check if using Supabase
         if hasattr(db, 'use_supabase') and db.use_supabase:
             # Use Supabase
             result = db.supabase.client.table('smtp_servers').select('*').eq('id', server_id).execute()
             if result.data and len(result.data) > 0:
                 server = result.data[0]
+                # Decrypt password
+                if server.get('password'):
+                    try:
+                        server['password'] = encryptor.decrypt(server['password'])
+                    except:
+                        pass  # If decryption fails, keep as-is
                 return jsonify({'success': True, 'server': server})
             else:
                 return jsonify({'error': 'Server not found'}), 404
@@ -2615,6 +3316,12 @@ def api_get_smtp(server_id):
             
             if row:
                 server = dict(row)
+                # Decrypt password
+                if server.get('password'):
+                    try:
+                        server['password'] = encryptor.decrypt(server['password'])
+                    except:
+                        pass  # If decryption fails, keep as-is
                 return jsonify({'success': True, 'server': server})
             else:
                 return jsonify({'error': 'Server not found'}), 404
@@ -3497,6 +4204,264 @@ def api_get_subscription_info(user_id):
         return jsonify({'success': True, 'subscription': info})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+# DNS Verification Routes
+@app.route('/api/dns/generate-dkim', methods=['POST'])
+@require_auth
+def api_generate_dkim(user_id):
+    """Generate DKIM keys for a domain"""
+    try:
+        from core.dns_verifier import DNSVerifier
+        
+        data = request.json if request.is_json else request.form.to_dict()
+        domain = data.get('domain', '').strip().lower()
+        
+        if not domain:
+            return jsonify({'success': False, 'error': 'Domain is required'}), 400
+        
+        dns_verifier = DNSVerifier(db)
+        keys = dns_verifier.generate_dkim_keys()
+        
+        if 'error' in keys:
+            return jsonify({'success': False, 'error': keys['error']}), 500
+        
+        # Save to database
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            # Check if domain exists
+            result = db.supabase.client.table('domains').select('id').eq('user_id', user_id).eq('domain', domain).execute()
+            
+            if result.data and len(result.data) > 0:
+                # Update existing
+                db.supabase.client.table('domains').update({
+                    'dkim_public_key': keys['public_key'],
+                    'dkim_private_key': keys['private_key'],
+                    'dkim_selector': keys['selector'],
+                    'updated_at': datetime.now().isoformat()
+                }).eq('id', result.data[0]['id']).execute()
+            else:
+                # Create new
+                db.supabase.client.table('domains').insert({
+                    'user_id': user_id,
+                    'domain': domain,
+                    'dkim_public_key': keys['public_key'],
+                    'dkim_private_key': keys['private_key'],
+                    'dkim_selector': keys['selector'],
+                    'verification_status': 'pending'
+                }).execute()
+        else:
+            cursor.execute("""
+                INSERT OR REPLACE INTO domains (user_id, domain, dkim_public_key, dkim_private_key, dkim_selector, verification_status, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+            """, (user_id, domain, keys['public_key'], keys['private_key'], keys['selector']))
+            conn.commit()
+        
+        # Get setup instructions
+        instructions = dns_verifier.get_dns_setup_instructions(domain, keys['public_key'], keys['selector'])
+        
+        return jsonify({
+            'success': True,
+            'keys': {
+                'selector': keys['selector'],
+                'dns_record': keys['dns_record']
+            },
+            'instructions': instructions
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/dns/verify', methods=['POST'])
+@require_auth
+def api_verify_dns(user_id):
+    """Verify DNS records for a domain"""
+    try:
+        from core.dns_verifier import DNSVerifier
+        
+        data = request.json if request.is_json else request.form.to_dict()
+        domain = data.get('domain', '').strip().lower()
+        dkim_selector = data.get('dkim_selector', '').strip()
+        
+        if not domain:
+            return jsonify({'success': False, 'error': 'Domain is required'}), 400
+        
+        dns_verifier = DNSVerifier(db)
+        
+        # Get selector from database if not provided
+        if not dkim_selector:
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            if hasattr(db, 'use_supabase') and db.use_supabase:
+                result = db.supabase.client.table('domains').select('dkim_selector').eq('user_id', user_id).eq('domain', domain).execute()
+                if result.data and len(result.data) > 0:
+                    dkim_selector = result.data[0].get('dkim_selector')
+            else:
+                cursor.execute("SELECT dkim_selector FROM domains WHERE user_id = ? AND domain = ?", (user_id, domain))
+                row = cursor.fetchone()
+                if row:
+                    dkim_selector = row[0]
+        
+        # Verify all records
+        results = dns_verifier.verify_all_records(domain, dkim_selector)
+        
+        # Update database with verification status
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            update_data = {
+                'spf_verified': 1 if results['spf'].get('is_valid') else 0,
+                'dkim_verified': 1 if results['dkim'].get('is_valid') else 0,
+                'dmarc_verified': 1 if results['dmarc'].get('is_valid') else 0,
+                'verification_status': 'verified' if results['all_valid'] else 'pending',
+                'updated_at': datetime.now().isoformat()
+            }
+            db.supabase.client.table('domains').update(update_data).eq('user_id', user_id).eq('domain', domain).execute()
+        else:
+            cursor.execute("""
+                UPDATE domains
+                SET spf_verified = ?,
+                    dkim_verified = ?,
+                    dmarc_verified = ?,
+                    verification_status = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND domain = ?
+            """, (
+                1 if results['spf'].get('is_valid') else 0,
+                1 if results['dkim'].get('is_valid') else 0,
+                1 if results['dmarc'].get('is_valid') else 0,
+                'verified' if results['all_valid'] else 'pending',
+                user_id,
+                domain
+            ))
+            conn.commit()
+        
+        return jsonify({
+            'success': True,
+            'verification': results
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/dns/domains', methods=['GET'])
+@require_auth
+def api_get_domains(user_id):
+    """Get all domains for user"""
+    try:
+        conn = db.connect()
+        cursor = conn.cursor()
+        
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            result = db.supabase.client.table('domains').select('*').eq('user_id', user_id).execute()
+            domains = result.data if result.data else []
+        else:
+            cursor.execute("SELECT * FROM domains WHERE user_id = ?", (user_id,))
+            rows = cursor.fetchall()
+            domains = [dict(row) for row in rows] if rows else []
+        
+        return jsonify({
+            'success': True,
+            'domains': domains
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# Onboarding Routes
+@app.route('/onboarding')
+@require_auth
+def onboarding_page(user_id):
+    """Onboarding wizard page"""
+    try:
+        from core.onboarding import OnboardingManager
+        onboarding_mgr = OnboardingManager(db)
+        status = onboarding_mgr.get_onboarding_status(user_id)
+        
+        if status.get('completed'):
+            return redirect('/dashboard')
+        
+        return render_template('onboarding.html', onboarding=status)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"Error loading onboarding: {str(e)}", 500
+
+@app.route('/api/onboarding/status', methods=['GET'])
+@require_auth
+def api_get_onboarding_status(user_id):
+    """Get onboarding status"""
+    try:
+        from core.onboarding import OnboardingManager
+        onboarding_mgr = OnboardingManager(db)
+        status = onboarding_mgr.get_onboarding_status(user_id)
+        return jsonify({'success': True, 'onboarding': status})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/onboarding/update-step', methods=['POST'])
+@require_auth
+def api_update_onboarding_step(user_id):
+    """Update onboarding step"""
+    try:
+        from core.onboarding import OnboardingManager
+        import json
+        
+        data = request.json if request.is_json else request.form.to_dict()
+        step = int(data.get('step', 0))
+        step_data = data.get('data', {})
+        
+        onboarding_mgr = OnboardingManager(db)
+        result = onboarding_mgr.update_onboarding_step(user_id, step, step_data)
+        
+        if result.get('success'):
+            # Get updated status
+            status = onboarding_mgr.get_onboarding_status(user_id)
+            return jsonify({
+                'success': True,
+                'onboarding': status
+            })
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/onboarding/complete', methods=['POST'])
+@require_auth
+def api_complete_onboarding(user_id):
+    """Complete onboarding"""
+    try:
+        from core.onboarding import OnboardingManager
+        
+        onboarding_mgr = OnboardingManager(db)
+        result = onboarding_mgr.complete_onboarding(user_id)
+        
+        if result.get('success'):
+            return jsonify({
+                'success': True,
+                'message': 'Onboarding completed successfully'
+            })
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/settings/test-redis', methods=['POST'])

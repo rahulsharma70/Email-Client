@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Payment Successful - ANAGHA SOLUTION</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .success-container {
+            max-width: 600px;
+            margin: 100px auto;
+            padding: 40px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .success-icon {
+            color: #28a745;
+            font-size: 64px;
+            margin-bottom: 20px;
+        }
+        .success-container h1 {
+            margin-bottom: 20px;
+            color: #333;
+        }
+        .success-container p {
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        .btn {
+            display: inline-block;
+            padding: 12px 24px;
+            background-color: #635bff;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 10px;
+        }
+        .btn:hover {
+            background-color: #5548e6;
+        }
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #635bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="success-container">
+        <div class="success-icon">✓</div>
+        <h1>Payment Successful!</h1>
+        <p>Thank you for your subscription. Your account is being activated...</p>
+        <div id="status-message"></div>
+        <div style="margin-top: 30px;">
+            <a href="/dashboard" class="btn" id="dashboard-btn" style="display: none;">Go to Dashboard</a>
+        </div>
+    </div>
+
+    <script>
+        const sessionId = '{{ session_id }}';
+        
+        if (sessionId) {
+            // Verify payment and wait for webhook processing
+            let attempts = 0;
+            const maxAttempts = 10;
+            
+            function checkAccountStatus() {
+                attempts++;
+                
+                fetch('/api/auth/me', {
+                    headers: {
+                        'Authorization': 'Bearer ' + (localStorage.getItem('token') || sessionStorage.getItem('token') || '')
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.user) {
+                        const statusEl = document.getElementById('status-message');
+                        const btnEl = document.getElementById('dashboard-btn');
+                        
+                        if (data.user.subscription_status === 'active' || data.user.subscription_plan !== 'free') {
+                            statusEl.innerHTML = '<p style="color: #28a745;">✓ Account activated! You can now access all features.</p>';
+                            btnEl.style.display = 'inline-block';
+                        } else if (attempts < maxAttempts) {
+                            statusEl.innerHTML = '<p>Processing your payment... Please wait.</p>';
+                            setTimeout(checkAccountStatus, 2000);
+                        } else {
+                            statusEl.innerHTML = '<p style="color: #ffc107;">Payment received but activation is taking longer than expected. Please contact support if this persists.</p>';
+                            btnEl.style.display = 'inline-block';
+                        }
+                    } else {
+                        // Not logged in, redirect to login
+                        window.location.href = '/login?message=Payment successful. Please log in to access your account.';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    if (attempts < maxAttempts) {
+                        setTimeout(checkAccountStatus, 2000);
+                    } else {
+                        document.getElementById('status-message').innerHTML = '<p style="color: #ffc107;">Please refresh the page or contact support.</p>';
+                        document.getElementById('dashboard-btn').style.display = 'inline-block';
+                    }
+                });
+            }
+            
+            // Start checking after 2 seconds (give webhook time to process)
+            setTimeout(checkAccountStatus, 2000);
+        } else {
+            document.getElementById('status-message').innerHTML = '<p style="color: #ffc107;">No session ID found. If you completed payment, please contact support.</p>';
+            document.getElementById('dashboard-btn').style.display = 'inline-block';
+        }
+    </script>
+</body>
+</html>

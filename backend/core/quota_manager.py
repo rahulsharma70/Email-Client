@@ -226,7 +226,7 @@ class QuotaManager:
         }
     
     def record_llm_usage(self, user_id: int, tokens: int):
-        """Record LLM token usage"""
+        """Record LLM token usage and cost"""
         conn = self.db.connect()
         cursor = conn.cursor()
         
@@ -239,10 +239,86 @@ class QuotaManager:
         result = cursor.fetchone()
         current = int(result[0]) if result and result[0] else 0
         
-        # Update usage
+        # Calculate cost (approximate: $0.002 per 1K tokens)
+        cost_per_1k_tokens = 0.002
+        cost = (tokens / 1000) * cost_per_1k_tokens
+        
+        # Get current cost
+        cursor.execute("""
+            SELECT setting_value FROM app_settings
+            WHERE user_id = ? AND setting_key = 'llm_cost_this_month'
+        """, (user_id,))
+        
+        result = cursor.fetchone()
+        current_cost = float(result[0]) if result and result[0] else 0.0
+        
+        # Update usage and cost
         from database.settings_manager import SettingsManager
         settings = SettingsManager(self.db)
         settings.set_setting('llm_tokens_used_this_month', str(current + tokens), user_id=user_id)
+        settings.set_setting('llm_cost_this_month', str(current_cost + cost), user_id=user_id)
+    
+    def check_llm_cost_quota(self, user_id: int, estimated_tokens: int = 0) -> Dict:
+        """
+        Check LLM cost quota per plan
+        
+        Returns:
+            Dictionary with allowed status and cost info
+        """
+        try:
+            plan = self.get_user_plan(user_id)
+            
+            # Cost limits per plan (in USD per month)
+            COST_LIMITS = {
+                'free': 0.0,
+                'start': 0.20,      # $0.20/month (100K tokens)
+                'growth': 1.00,     # $1.00/month (500K tokens)
+                'pro': 4.00,        # $4.00/month (2M tokens)
+                'agency': 20.00     # $20.00/month (10M tokens)
+            }
+            
+            cost_limit = COST_LIMITS.get(plan, COST_LIMITS['start'])
+            
+            # Get current cost
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
+                result = self.db.supabase.client.table('app_settings').select('setting_value').eq('user_id', user_id).eq('setting_key', 'llm_cost_this_month').execute()
+                current_cost = float(result.data[0]['setting_value']) if result.data and len(result.data) > 0 and result.data[0].get('setting_value') else 0.0
+            else:
+                cursor.execute("""
+                    SELECT setting_value FROM app_settings
+                    WHERE user_id = ? AND setting_key = 'llm_cost_this_month'
+                """, (user_id,))
+                result = cursor.fetchone()
+                current_cost = float(result[0]) if result and result[0] else 0.0
+            
+            # Estimate cost for this request
+            cost_per_1k_tokens = 0.002
+            estimated_cost = (estimated_tokens / 1000) * cost_per_1k_tokens
+            total_cost = current_cost + estimated_cost
+            
+            if total_cost > cost_limit:
+                return {
+                    'allowed': False,
+                    'reason': f'LLM cost limit ({cost_limit:.2f}) exceeded. Current: ${current_cost:.2f}, Estimated: ${estimated_cost:.2f}',
+                    'limit': cost_limit,
+                    'current': current_cost,
+                    'estimated': estimated_cost
+                }
+            
+            return {
+                'allowed': True,
+                'limit': cost_limit,
+                'current': current_cost,
+                'remaining': cost_limit - current_cost,
+                'estimated': estimated_cost
+            }
+            
+        except Exception as e:
+            print(f"Error checking LLM cost quota: {e}")
+            return {'allowed': True}  # Allow on error
     
     def enforce_quota_at_enqueue(self, user_id: int, email_count: int, 
                                  domain: str = None, provider: str = None) -> Dict:

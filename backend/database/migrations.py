@@ -121,6 +121,7 @@ class MigrationManager:
             self._migration_add_oauth_columns,
             self._migration_add_llm_tracking,
             self._migration_add_metrics_tables,
+            self._migration_add_email_verification,
         ]
         
         for migration in migrations:
@@ -246,6 +247,108 @@ class MigrationManager:
         
         conn.commit()
         print("✓ Metrics tables created")
+    
+    def _migration_add_email_verification(self):
+        """Add email verification columns to users table"""
+        conn = self.db.connect()
+        cursor = conn.cursor()
+        
+        columns_to_add = [
+            ('email_verified', 'INTEGER DEFAULT 0'),
+            ('email_verification_token', 'TEXT'),
+            ('email_verification_sent_at', 'TIMESTAMP'),
+            ('one_time_password', 'TEXT'),
+            ('account_activated_at', 'TIMESTAMP'),
+            ('onboarding_completed', 'INTEGER DEFAULT 0'),
+            ('onboarding_step', 'INTEGER DEFAULT 0'),
+            ('onboarding_data', 'TEXT'),
+        ]
+        
+        for column_name, column_type in columns_to_add:
+            try:
+                cursor.execute(f"""
+                    ALTER TABLE users 
+                    ADD COLUMN {column_name} {column_type}
+                """)
+                print(f"✓ Added column: users.{column_name}")
+            except sqlite3.OperationalError:
+                # Column already exists
+                pass
+        
+        # Create usage_counters table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS usage_counters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                counter_type TEXT NOT NULL,
+                current_value INTEGER DEFAULT 0,
+                reset_date DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                UNIQUE(user_id, counter_type)
+            )
+        """)
+        
+        conn.commit()
+        print("✓ Usage counters table created")
+        
+        # Create domains table for DNS verification
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS domains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                domain TEXT NOT NULL,
+                spf_verified INTEGER DEFAULT 0,
+                dkim_verified INTEGER DEFAULT 0,
+                dmarc_verified INTEGER DEFAULT 0,
+                dkim_public_key TEXT,
+                dkim_private_key TEXT,
+                dkim_selector TEXT,
+                verification_status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                UNIQUE(user_id, domain)
+            )
+        """)
+        
+        conn.commit()
+        print("✓ Domains table created")
+        
+        # Create banned_domains table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS banned_domains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT NOT NULL UNIQUE,
+                reason TEXT,
+                banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create user_fingerprints table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_fingerprints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                ip_address TEXT,
+                user_agent TEXT,
+                browser_fingerprint TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        
+        conn.commit()
+        print("✓ Abuse prevention tables created")
+        
+        # Add personalization_prompt column to campaigns table
+        try:
+            cursor.execute("ALTER TABLE campaigns ADD COLUMN personalization_prompt TEXT")
+            print("✓ Added personalization_prompt column to campaigns")
+        except sqlite3.OperationalError:
+            pass  # Column may already exist
+        
+        conn.commit()
     
     def validate_tenant_isolation(self) -> List[Dict]:
         """Validate that all queries properly filter by user_id"""

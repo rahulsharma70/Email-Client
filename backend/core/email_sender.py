@@ -147,10 +147,26 @@ class EmailSender:
                     # Get campaign personalization setting
                     conn = self.db.connect()
                     cursor = conn.cursor()
-                    cursor.execute("SELECT use_personalization FROM campaigns WHERE id = ?", (queue_item.get('campaign_id'),))
-                    row = cursor.fetchone()
-                    use_personalization = row[0] if row and row[0] else 0
-                    queue_item['use_personalization'] = bool(use_personalization)
+                    # Get campaign details including personalization (if not already in queue_item from JOIN)
+                    if 'use_personalization' not in queue_item:
+                        if use_supabase:
+                            result = self.db.supabase.client.table('campaigns').select('use_personalization, personalization_prompt, user_id').eq('id', queue_item.get('campaign_id')).execute()
+                            if result.data and len(result.data) > 0:
+                                camp = result.data[0]
+                                queue_item['use_personalization'] = bool(camp.get('use_personalization', 0))
+                                queue_item['personalization_prompt'] = camp.get('personalization_prompt')
+                                queue_item['campaign_user_id'] = camp.get('user_id')
+                        else:
+                            cursor.execute("SELECT use_personalization, personalization_prompt, user_id FROM campaigns WHERE id = ?", (queue_item.get('campaign_id'),))
+                            row = cursor.fetchone()
+                            if row:
+                                queue_item['use_personalization'] = bool(row[0] if row[0] else 0)
+                                queue_item['personalization_prompt'] = row[1] if len(row) > 1 else None
+                                queue_item['campaign_user_id'] = row[2] if len(row) > 2 else None
+                    else:
+                        # Convert use_personalization to boolean if it's an integer
+                        if isinstance(queue_item.get('use_personalization'), int):
+                            queue_item['use_personalization'] = bool(queue_item['use_personalization'])
                     self.send_email(queue_item)
                     print(f"[{thread_name}] Waiting {self.interval} seconds before next email...")
                     time.sleep(self.interval)
@@ -177,7 +193,7 @@ class EmailSender:
             cursor.execute("""
                 SELECT eq.id as queue_id, eq.campaign_id, eq.recipient_id, eq.smtp_server_id,
                        c.name as campaign_name, c.subject, c.sender_name, c.sender_email, 
-                       c.reply_to, c.html_content,
+                       c.reply_to, c.html_content, c.use_personalization, c.personalization_prompt, c.user_id,
                        r.email, r.first_name, r.last_name, r.company, r.city, r.is_unsubscribed,
                        s.host, s.port, s.username, s.password, s.use_tls, s.use_ssl, s.is_active
                 FROM email_queue eq
@@ -243,7 +259,23 @@ class EmailSender:
             warmup_manager = WarmupManager(self.db)
             
             smtp_server_id = queue_item.get('smtp_server_id')
-            if smtp_server_id:
+            user_id = queue_item.get('user_id')
+            
+            if smtp_server_id and user_id:
+                # Check policy enforcement
+                from core.policy_enforcer import PolicyEnforcer
+                policy_enforcer = PolicyEnforcer(self.db)
+                
+                # Extract domain from sender email
+                sender_email = queue_item.get('sender_email', '')
+                domain = sender_email.split('@')[1] if '@' in sender_email else None
+                
+                # Enforce all policies
+                policy_check = policy_enforcer.enforce_all_policies(user_id, smtp_server_id, 1, domain)
+                if not policy_check.get('allowed'):
+                    self.mark_failed(queue_item['queue_id'], f"Policy violation: {policy_check.get('reason', 'Policy check failed')}")
+                    return
+                
                 # Check rate limit
                 rate_check = rate_limiter.check_rate_limit(smtp_server_id)
                 if not rate_check.get('can_send'):
@@ -323,7 +355,9 @@ class EmailSender:
                 'sender_email': queue_item.get('sender_email', ''),
                 'reply_to': queue_item.get('reply_to'),
                 'html_content': queue_item.get('html_content', ''),
-                'use_personalization': queue_item.get('use_personalization', False)
+                'use_personalization': queue_item.get('use_personalization', False),
+                'personalization_prompt': queue_item.get('personalization_prompt'),
+                'user_id': queue_item.get('campaign_user_id') or queue_item.get('user_id')
             }
             
             # Store queue_item for personalization access
@@ -337,9 +371,13 @@ class EmailSender:
                 'city': queue_item.get('city', '')
             }
             
+            # Store user_id for personalization
+            self._current_user_id = queue_item.get('campaign_user_id') or queue_item.get('user_id')
+            
             # Prepare email
             msg = self.prepare_email(campaign, recipient, smtp_config, 
-                                   queue_item['campaign_id'], queue_item['recipient_id'])
+                                   queue_item['campaign_id'], queue_item['recipient_id'],
+                                   personalization_prompt=queue_item.get('personalization_prompt'))
             
             # Connect to SMTP server
             try:
@@ -563,8 +601,8 @@ class EmailSender:
             print(traceback.format_exc())
             self.mark_failed(queue_item['queue_id'], error_msg)
     
-    def prepare_email(self, campaign, recipient, smtp_config, campaign_id=None, recipient_id=None):
-        """Prepare email message with merge tags"""
+    def prepare_email(self, campaign, recipient, smtp_config, campaign_id=None, recipient_id=None, personalization_prompt=None):
+        """Prepare email message with merge tags and optional LLM personalization"""
         msg = MIMEMultipart('mixed')  # Changed to 'mixed' to support attachments
         
         # Get sender information
@@ -612,17 +650,47 @@ class EmailSender:
         if use_personalization:
             try:
                 from core.personalization import EmailPersonalizer
-                personalizer = EmailPersonalizer()
+                from core.quota_manager import QuotaManager
+                from core.observability import ObservabilityManager
+                
+                # Get user_id from campaign or queue_item
+                user_id = campaign.get('user_id') or getattr(self, '_current_user_id', None)
+                
+                personalizer = EmailPersonalizer(db_manager=self.db, user_id=user_id)
                 
                 # Get recipient context
                 name = recipient.get('first_name', '') + ' ' + recipient.get('last_name', '')
                 company = recipient.get('company', '')
                 context = recipient.get('context', '')
                 
-                # Personalize the content
-                html_content = personalizer.personalize_email(html_content, name.strip(), company, context)
+                # Get custom prompt from campaign
+                custom_prompt = campaign.get('personalization_prompt')
+                
+                # Track LLM usage start
+                quota_mgr = QuotaManager(self.db)
+                obs_mgr = ObservabilityManager(self.db)
+                
+                # Personalize the content (use prompt from parameter or campaign)
+                prompt_to_use = personalization_prompt or custom_prompt
+                html_content = personalizer.personalize_email(
+                    html_content, 
+                    name.strip(), 
+                    company, 
+                    context,
+                    custom_prompt=prompt_to_use
+                )
+                
+                # Record LLM usage (tokens are already recorded in personalizer)
+                if user_id:
+                    obs_mgr.record_metric(user_id, 'llm', 'personalization_used', 1.0, {
+                        'campaign_id': campaign_id,
+                        'recipient_id': recipient_id
+                    })
+                    
             except Exception as e:
                 print(f"Warning: Personalization failed, using original template: {e}")
+                import traceback
+                traceback.print_exc()
                 # Continue with original content
         
         # Extract attachment paths if embedded in HTML
@@ -788,18 +856,30 @@ class EmailSender:
     
     def replace_merge_tags(self, text, recipient):
         """Replace merge tags in text"""
+        if not text:
+            return ''
+        
+        # Get values with fallback to empty string if None
+        first_name = recipient.get('first_name') or ''
+        last_name = recipient.get('last_name') or ''
+        full_name = f"{first_name} {last_name}".strip() or recipient.get('name') or ''
+        
         replacements = {
-            '{name}': recipient.get('first_name', '') + ' ' + recipient.get('last_name', ''),
-            '{first_name}': recipient.get('first_name', ''),
-            '{last_name}': recipient.get('last_name', ''),
-            '{email}': recipient.get('email', ''),
-            '{company}': recipient.get('company', ''),
-            '{city}': recipient.get('city', ''),
+            '{name}': full_name,
+            '{first_name}': first_name,
+            '{last_name}': last_name,
+            '{email}': recipient.get('email') or '',
+            '{company}': recipient.get('company') or recipient.get('company_name') or '',
+            '{city}': recipient.get('city') or '',
+            '{title}': recipient.get('title') or '',
+            '{phone}': recipient.get('phone') or '',
         }
         
-        result = text
+        result = str(text)  # Ensure text is a string
         for tag, value in replacements.items():
-            result = result.replace(tag, value)
+            # Ensure value is a string (handle None)
+            value_str = str(value) if value is not None else ''
+            result = result.replace(tag, value_str)
         
         return result
     
@@ -851,22 +931,13 @@ class EmailSender:
             default_server = self.db.get_default_smtp_server()
             if default_server:
                 # Ensure password is properly decoded
-                if 'password' in default_server and default_server['password']:
-                    password = default_server['password']
-                    if isinstance(password, bytes):
-                        password = password.decode('utf-8')
-                    default_server['password'] = password
+                # Password should already be decrypted by get_default_smtp_server()
                 return default_server
             # Fallback to first active server
             servers = self.db.get_smtp_servers()
             if servers:
                 server = servers[0]
-                # Ensure password is properly decoded
-                if 'password' in server and server['password']:
-                    password = server['password']
-                    if isinstance(password, bytes):
-                        password = password.decode('utf-8')
-                    server['password'] = password
+                # Password should already be decrypted by get_smtp_servers()
                 return server
             return None
         
@@ -876,12 +947,18 @@ class EmailSender:
             result = self.db.supabase.client.table('smtp_servers').select('*').eq('id', smtp_id).eq('is_active', 1).execute()
             if result.data and len(result.data) > 0:
                 server = result.data[0]
-                # Ensure password is properly decoded
+                # Decrypt password
                 if 'password' in server and server['password']:
-                    password = server['password']
-                    if isinstance(password, bytes):
-                        password = password.decode('utf-8')
-                    server['password'] = password
+                    try:
+                        from core.encryption import get_encryption_manager
+                        encryptor = get_encryption_manager()
+                        server['password'] = encryptor.decrypt(server['password'])
+                    except:
+                        # If decryption fails, might be plaintext from old data
+                        password = server['password']
+                        if isinstance(password, bytes):
+                            password = password.decode('utf-8')
+                        server['password'] = password
                 return server
             return None
         else:
@@ -892,12 +969,18 @@ class EmailSender:
             row = cursor.fetchone()
             if row:
                 server = dict(row)
-                # Ensure password is properly decoded
+                # Decrypt password
                 if 'password' in server and server['password']:
-                    password = server['password']
-                    if isinstance(password, bytes):
-                        password = password.decode('utf-8')
-                    server['password'] = password
+                    try:
+                        from core.encryption import get_encryption_manager
+                        encryptor = get_encryption_manager()
+                        server['password'] = encryptor.decrypt(server['password'])
+                    except:
+                        # If decryption fails, might be plaintext from old data
+                        password = server['password']
+                        if isinstance(password, bytes):
+                            password = password.decode('utf-8')
+                        server['password'] = password
                 return server
             return None
     
@@ -980,33 +1063,60 @@ class EmailSender:
     
     def mark_sent(self, queue_id, campaign_id, recipient_id, email_message=None, recipient_info=None, campaign_info=None, smtp_server_id=None):
         """Mark email as sent and save to sent_emails table"""
-        conn = self.db.connect()
-        cursor = conn.cursor()
-        
         # Use IST timezone for timestamp
         now = get_ist_now()
         
+        # Check if using Supabase
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
+        
         # Get recipient and campaign info if not provided
         if not recipient_info:
-            cursor.execute("SELECT email, first_name, last_name FROM recipients WHERE id = ?", (recipient_id,))
-            rec_row = cursor.fetchone()
-            if rec_row:
-                recipient_info = {
-                    'email': rec_row[0],
-                    'first_name': rec_row[1] or '',
-                    'last_name': rec_row[2] or ''
-                }
+            if use_supabase:
+                result = self.db.supabase.client.table('recipients').select('email, first_name, last_name').eq('id', recipient_id).execute()
+                if result.data and len(result.data) > 0:
+                    rec = result.data[0]
+                    recipient_info = {
+                        'email': rec.get('email', ''),
+                        'first_name': rec.get('first_name', '') or '',
+                        'last_name': rec.get('last_name', '') or ''
+                    }
+            else:
+                conn = self.db.connect()
+                cursor = conn.cursor()
+                cursor.execute("SELECT email, first_name, last_name FROM recipients WHERE id = ?", (recipient_id,))
+                rec_row = cursor.fetchone()
+                if rec_row:
+                    recipient_info = {
+                        'email': rec_row[0],
+                        'first_name': rec_row[1] or '',
+                        'last_name': rec_row[2] or ''
+                    }
         
         if not campaign_info:
-            cursor.execute("SELECT subject, sender_name, sender_email, html_content FROM campaigns WHERE id = ?", (campaign_id,))
-            camp_row = cursor.fetchone()
-            if camp_row:
-                campaign_info = {
-                    'subject': camp_row[0],
-                    'sender_name': camp_row[1] or '',
-                    'sender_email': camp_row[2],
-                    'html_content': camp_row[3] or ''
-                }
+            if use_supabase:
+                result = self.db.supabase.client.table('campaigns').select('subject, sender_name, sender_email, html_content, user_id').eq('id', campaign_id).execute()
+                if result.data and len(result.data) > 0:
+                    camp = result.data[0]
+                    campaign_info = {
+                        'subject': camp.get('subject', ''),
+                        'sender_name': camp.get('sender_name', '') or '',
+                        'sender_email': camp.get('sender_email', ''),
+                        'html_content': camp.get('html_content', '') or '',
+                        'user_id': camp.get('user_id')
+                    }
+            else:
+                conn = self.db.connect()
+                cursor = conn.cursor()
+                cursor.execute("SELECT subject, sender_name, sender_email, html_content, user_id FROM campaigns WHERE id = ?", (campaign_id,))
+                camp_row = cursor.fetchone()
+                if camp_row:
+                    campaign_info = {
+                        'subject': camp_row[0],
+                        'sender_name': camp_row[1] or '',
+                        'sender_email': camp_row[2],
+                        'html_content': camp_row[3] or '',
+                        'user_id': camp_row[4] if len(camp_row) > 4 else None
+                    }
         
         # Extract text content from email message if available
         text_content = ''
@@ -1048,61 +1158,141 @@ class EmailSender:
         recipient_name = f"{recipient_info.get('first_name', '')} {recipient_info.get('last_name', '')}".strip() if recipient_info else ''
         recipient_email = recipient_info.get('email', '') if recipient_info else ''
         
-        cursor.execute("""
-            INSERT INTO sent_emails (
-                campaign_id, recipient_id, recipient_email, recipient_name,
-                subject, sender_name, sender_email, html_content, text_content,
-                sent_at, status, smtp_server_id, message_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            campaign_id, recipient_id, recipient_email, recipient_name,
-            campaign_info.get('subject', '') if campaign_info else '',
-            campaign_info.get('sender_name', '') if campaign_info else '',
-            campaign_info.get('sender_email', '') if campaign_info else '',
-            html_content, text_content,
-            now, 'sent', smtp_server_id, message_id
-        ))
-        
-        # Update queue
-        cursor.execute("""
-            UPDATE email_queue 
-            SET status = 'sent', sent_at = ?
-            WHERE id = ?
-        """, (now, queue_id))
-        
-        # Update campaign_recipients
-        cursor.execute("""
-            UPDATE campaign_recipients 
-            SET status = 'sent', sent_at = ?
-            WHERE campaign_id = ? AND recipient_id = ?
-        """, (now, campaign_id, recipient_id))
-        
-        # Check if all emails for this campaign are sent (including processing)
-        cursor.execute("""
-            SELECT COUNT(*) FROM email_queue 
-            WHERE campaign_id = ? AND status IN ('pending', 'processing')
-        """, (campaign_id,))
-        pending_count = cursor.fetchone()[0]
-        
-        # If no pending emails, update campaign status to 'sent'
-        if pending_count == 0:
+        if use_supabase:
+            # Supabase
+            sent_email_data = {
+                'campaign_id': campaign_id,
+                'recipient_id': recipient_id,
+                'recipient_email': recipient_email,
+                'recipient_name': recipient_name,
+                'subject': campaign_info.get('subject', '') if campaign_info else '',
+                'sender_name': campaign_info.get('sender_name', '') if campaign_info else '',
+                'sender_email': campaign_info.get('sender_email', '') if campaign_info else '',
+                'html_content': html_content,
+                'text_content': text_content,
+                'sent_at': now.isoformat(),
+                'status': 'sent',
+                'smtp_server_id': smtp_server_id,
+                'message_id': message_id
+            }
+            self.db.supabase.client.table('sent_emails').insert(sent_email_data).execute()
+            
+            # Update queue
+            self.db.supabase.client.table('email_queue').update({
+                'status': 'sent',
+                'sent_at': now.isoformat()
+            }).eq('id', queue_id).execute()
+            
+            # Update campaign_recipients
+            self.db.supabase.client.table('campaign_recipients').update({
+                'status': 'sent',
+                'sent_at': now.isoformat()
+            }).eq('campaign_id', campaign_id).eq('recipient_id', recipient_id).execute()
+            
+            # Check if all emails for this campaign are sent
+            result = self.db.supabase.client.table('email_queue').select('id', count='exact').eq('campaign_id', campaign_id).in_('status', ['pending', 'processing']).execute()
+            pending_count = result.count if result.count else 0
+            
+            if pending_count == 0:
+                self.db.supabase.client.table('campaigns').update({
+                    'status': 'sent',
+                    'sent_at': now.isoformat()
+                }).eq('id', campaign_id).execute()
+                print(f"Campaign {campaign_id} marked as sent (all emails delivered)")
+            
+            # Update daily stats (with user_id)
+            user_id = campaign_info.get('user_id') if campaign_info else None
+            if not user_id:
+                # Try to get from campaign
+                camp_result = self.db.supabase.client.table('campaigns').select('user_id').eq('id', campaign_id).execute()
+                if camp_result.data and len(camp_result.data) > 0:
+                    user_id = camp_result.data[0].get('user_id')
+            
+            if user_id:
+                today = get_ist_now().date().isoformat()
+                # Try to get existing stats
+                stats_result = self.db.supabase.client.table('daily_stats').select('*').eq('user_id', user_id).eq('date', today).execute()
+                if stats_result.data and len(stats_result.data) > 0:
+                    existing = stats_result.data[0]
+                    self.db.supabase.client.table('daily_stats').update({
+                        'emails_sent': (existing.get('emails_sent', 0) or 0) + 1,
+                        'emails_delivered': (existing.get('emails_delivered', 0) or 0) + 1
+                    }).eq('id', existing['id']).execute()
+                else:
+                    self.db.supabase.client.table('daily_stats').insert({
+                        'user_id': user_id,
+                        'date': today,
+                        'emails_sent': 1,
+                        'emails_delivered': 1
+                    }).execute()
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
             cursor.execute("""
-                UPDATE campaigns SET status = 'sent', sent_at = ?
+                INSERT INTO sent_emails (
+                    campaign_id, recipient_id, recipient_email, recipient_name,
+                    subject, sender_name, sender_email, html_content, text_content,
+                    sent_at, status, smtp_server_id, message_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                campaign_id, recipient_id, recipient_email, recipient_name,
+                campaign_info.get('subject', '') if campaign_info else '',
+                campaign_info.get('sender_name', '') if campaign_info else '',
+                campaign_info.get('sender_email', '') if campaign_info else '',
+                html_content, text_content,
+                now, 'sent', smtp_server_id, message_id
+            ))
+            
+            # Update queue
+            cursor.execute("""
+                UPDATE email_queue 
+                SET status = 'sent', sent_at = ?
                 WHERE id = ?
-            """, (now, campaign_id))
-            print(f"Campaign {campaign_id} marked as sent (all emails delivered)")
-        
-        # Update daily stats - use IST date
-        today = get_ist_now().date()
-        cursor.execute("""
-            INSERT OR REPLACE INTO daily_stats (date, emails_sent, emails_delivered)
-            VALUES (?, 
-                COALESCE((SELECT emails_sent FROM daily_stats WHERE date = ?), 0) + 1,
-                COALESCE((SELECT emails_delivered FROM daily_stats WHERE date = ?), 0) + 1
-            )
-        """, (today, today, today))
-        
-        conn.commit()
+            """, (now, queue_id))
+            
+            # Update campaign_recipients
+            cursor.execute("""
+                UPDATE campaign_recipients 
+                SET status = 'sent', sent_at = ?
+                WHERE campaign_id = ? AND recipient_id = ?
+            """, (now, campaign_id, recipient_id))
+            
+            # Check if all emails for this campaign are sent (including processing)
+            cursor.execute("""
+                SELECT COUNT(*) FROM email_queue 
+                WHERE campaign_id = ? AND status IN ('pending', 'processing')
+            """, (campaign_id,))
+            pending_count = cursor.fetchone()[0]
+            
+            # If no pending emails, update campaign status to 'sent'
+            if pending_count == 0:
+                cursor.execute("""
+                    UPDATE campaigns SET status = 'sent', sent_at = ?
+                    WHERE id = ?
+                """, (now, campaign_id))
+                print(f"Campaign {campaign_id} marked as sent (all emails delivered)")
+            
+            # Update daily stats - use IST date (with user_id)
+            user_id = campaign_info.get('user_id') if campaign_info else None
+            if not user_id:
+                cursor.execute("SELECT user_id FROM campaigns WHERE id = ?", (campaign_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row[0]
+            
+            if user_id:
+                today = get_ist_now().date()
+                cursor.execute("""
+                    INSERT OR REPLACE INTO daily_stats (user_id, date, emails_sent, emails_delivered)
+                    VALUES (?, ?, 
+                        COALESCE((SELECT emails_sent FROM daily_stats WHERE user_id = ? AND date = ?), 0) + 1,
+                        COALESCE((SELECT emails_delivered FROM daily_stats WHERE user_id = ? AND date = ?), 0) + 1
+                    )
+                """, (user_id, today, user_id, today, user_id, today))
+            
+            conn.commit()
     
     def mark_failed(self, queue_id, error_msg):
         """Mark email as failed"""

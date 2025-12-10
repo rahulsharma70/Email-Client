@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
     template_id BIGINT REFERENCES templates(id) ON DELETE SET NULL,
     status TEXT DEFAULT 'draft',
     use_personalization INTEGER DEFAULT 0,
+    personalization_prompt TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
     scheduled_at TIMESTAMP,
     sent_at TIMESTAMP

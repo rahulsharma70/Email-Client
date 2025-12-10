@@ -575,7 +575,10 @@ class DatabaseManager:
         return cursor.lastrowid
     
     def get_smtp_servers(self, active_only: bool = True, user_id: int = None) -> List[Dict]:
-        """Get all SMTP servers (filtered by user_id if provided)"""
+        """Get all SMTP servers with decrypted passwords"""
+        from core.encryption import get_encryption_manager
+        encryptor = get_encryption_manager()
+        
         conn = self.connect()
         cursor = conn.cursor()
         query = "SELECT * FROM smtp_servers WHERE 1=1"
@@ -593,54 +596,78 @@ class DatabaseManager:
         servers = []
         for row in cursor.fetchall():
             server = dict(row)
-            # Ensure password is a string (not bytes) and properly decoded
+            # Decrypt password
             if 'password' in server and server['password']:
-                password = server['password']
-                if isinstance(password, bytes):
-                    password = password.decode('utf-8')
-                server['password'] = password
+                try:
+                    server['password'] = encryptor.decrypt(server['password'])
+                except:
+                    # If decryption fails, might be plaintext from old data
+                    password = server['password']
+                    if isinstance(password, bytes):
+                        password = password.decode('utf-8')
+                    server['password'] = password
             servers.append(server)
         return servers
     
     def get_default_smtp_server(self) -> Optional[Dict]:
-        """Get default SMTP server"""
+        """Get default SMTP server with decrypted password"""
+        from core.encryption import get_encryption_manager
+        encryptor = get_encryption_manager()
+        
         conn = self.connect()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM smtp_servers WHERE is_default = 1 AND is_active = 1 LIMIT 1")
         row = cursor.fetchone()
         if row:
             server = dict(row)
-            # Ensure password is a string (not bytes) and properly decoded
+            # Decrypt password
             if 'password' in server and server['password']:
-                password = server['password']
-                if isinstance(password, bytes):
-                    password = password.decode('utf-8')
-                server['password'] = password
+                try:
+                    server['password'] = encryptor.decrypt(server['password'])
+                except:
+                    # If decryption fails, might be plaintext from old data
+                    password = server['password']
+                    if isinstance(password, bytes):
+                        password = password.decode('utf-8')
+                    server['password'] = password
             return server
         # Fallback to first active server
         cursor.execute("SELECT * FROM smtp_servers WHERE is_active = 1 LIMIT 1")
         row = cursor.fetchone()
         if row:
             server = dict(row)
-            # Ensure password is a string (not bytes) and properly decoded
+            # Decrypt password
             if 'password' in server and server['password']:
-                password = server['password']
-                if isinstance(password, bytes):
-                    password = password.decode('utf-8')
-                server['password'] = password
+                try:
+                    server['password'] = encryptor.decrypt(server['password'])
+                except:
+                    # If decryption fails, might be plaintext from old data
+                    password = server['password']
+                    if isinstance(password, bytes):
+                        password = password.decode('utf-8')
+                    server['password'] = password
             return server
         return None
     
     def create_campaign(self, name: str, subject: str, sender_name: str, 
                        sender_email: str, reply_to: str = None, html_content: str = "",
-                       template_id: int = None, use_personalization: bool = False, user_id: int = None) -> int:
+                       template_id: int = None, use_personalization: bool = False, user_id: int = None,
+                       personalization_prompt: str = None) -> int:
         """Create a new email campaign"""
         conn = self.connect()
         cursor = conn.cursor()
+        
+        # Add personalization_prompt column if it doesn't exist
+        try:
+            cursor.execute("ALTER TABLE campaigns ADD COLUMN personalization_prompt TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column may already exist
+        
         cursor.execute("""
-            INSERT INTO campaigns (name, subject, sender_name, sender_email, reply_to, html_content, template_id, use_personalization, user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (name, subject, sender_name, sender_email, reply_to, html_content, template_id, 1 if use_personalization else 0, user_id))
+            INSERT INTO campaigns (name, subject, sender_name, sender_email, reply_to, html_content, template_id, use_personalization, user_id, personalization_prompt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (name, subject, sender_name, sender_email, reply_to, html_content, template_id, 1 if use_personalization else 0, user_id, personalization_prompt))
         conn.commit()
         return cursor.lastrowid
     

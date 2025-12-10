@@ -97,11 +97,20 @@
         
         <div class="form-group">
             <label>
-                <input type="checkbox" name="use_personalization" id="usePersonalization">
+                <input type="checkbox" name="use_personalization" id="usePersonalization" onchange="togglePersonalizationPrompt()">
                 Enable AI Personalization (uses OpenRouter API)
             </label>
             <small style="color: #7f8c8d; display: block; margin-top: 5px;">
                 💡 Personalize emails using AI based on recipient name, company, and context
+            </small>
+        </div>
+        
+        <div class="form-group" id="personalizationPromptGroup" style="display: none;">
+            <label for="personalizationPrompt">Personalization Prompt *</label>
+            <textarea name="personalization_prompt" id="personalizationPrompt" rows="6" 
+                      placeholder="Enter instructions for how to personalize the email. You can use placeholders: {template}, {name}, {company}, {context}"></textarea>
+            <small style="color: #7f8c8d; display: block; margin-top: 5px;">
+                Example: "Personalize this email template for {name} at {company}. Make it conversational and reference their industry. Template: {template}"
             </small>
         </div>
         
@@ -131,6 +140,21 @@
 
 {% block extra_js %}
 <script>
+function togglePersonalizationPrompt() {
+    const checkbox = document.getElementById('usePersonalization');
+    const promptGroup = document.getElementById('personalizationPromptGroup');
+    const promptField = document.getElementById('personalizationPrompt');
+    
+    if (checkbox.checked) {
+        promptGroup.style.display = 'block';
+        promptField.required = true;
+    } else {
+        promptGroup.style.display = 'none';
+        promptField.required = false;
+        promptField.value = '';
+    }
+}
+
 // Load templates on page load
 let templatesData = {};
 {% for template in templates %}
@@ -478,6 +502,16 @@ document.getElementById('campaignForm').addEventListener('submit', async functio
     const usePersonalization = document.getElementById('usePersonalization').checked;
     uploadFormData.append('use_personalization', usePersonalization ? 'on' : '');
     
+    // Add personalization prompt if enabled
+    if (usePersonalization) {
+        const prompt = document.getElementById('personalizationPrompt').value.trim();
+        if (!prompt) {
+            showAlert('Personalization prompt is required when AI personalization is enabled', 'error');
+            return;
+        }
+        uploadFormData.append('personalization_prompt', prompt);
+    }
+    
     // Get send_now checkbox value
     uploadFormData.append('send_now', sendNow ? 'on' : '');
     
@@ -537,6 +571,13 @@ function saveDraft() {
     
     const sendNow = document.getElementById('sendNowCheckbox').checked;
     uploadFormData.append('send_now', sendNow ? 'on' : '');
+    
+    // Add personalization prompt if enabled
+    const usePersonalization = document.getElementById('usePersonalization').checked;
+    if (usePersonalization) {
+        const prompt = document.getElementById('personalizationPrompt').value.trim();
+        uploadFormData.append('personalization_prompt', prompt);
+    }
     
     // Add attachments
     const attachments = formData.getAll('attachments');

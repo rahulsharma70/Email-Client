@@ -50,7 +50,7 @@ class EmailPersonalizer:
         estimated_tokens = 500  # Conservative estimate per personalization
         return quota_mgr.check_llm_quota(self.user_id, estimated_tokens)
     
-    def personalize_email(self, template: str, name: str, company: str, context: str = "", use_cache: bool = True) -> str:
+    def personalize_email(self, template: str, name: str, company: str, context: str = "", use_cache: bool = True, custom_prompt: str = None) -> str:
         """
         Personalize email template using LLM with quota and caching
         
@@ -60,6 +60,7 @@ class EmailPersonalizer:
             company: Company name
             context: Additional context about the recipient/company
             use_cache: Whether to use cached results
+            custom_prompt: Custom personalization prompt from campaign (optional)
             
         Returns:
             Personalized email content
@@ -76,7 +77,7 @@ class EmailPersonalizer:
             if cache_key in self._cache:
                 return self._cache[cache_key]
         
-        # Check quota
+        # Check quota (both tokens and cost)
         quota_check = self._check_quota()
         if not quota_check.get('allowed', True):
             # Quota exceeded - use fallback
@@ -85,7 +86,28 @@ class EmailPersonalizer:
             personalized = personalized.replace('{company}', company)
             return personalized
         
-        prompt = f"""Personalize this email template for a specific recipient.
+        # Check cost quota (estimate: 500 tokens per personalization)
+        estimated_tokens = 500
+        if self.db and self.user_id:
+            from core.quota_manager import QuotaManager
+            quota_mgr = QuotaManager(self.db)
+            cost_check = quota_mgr.check_llm_cost_quota(self.user_id, estimated_tokens)
+            if not cost_check.get('allowed', True):
+                print(f"LLM cost quota exceeded for user {self.user_id}, using fallback")
+                personalized = template.replace('{name}', name)
+                personalized = personalized.replace('{company}', company)
+                return personalized
+        
+        # Use custom prompt if provided, otherwise use default
+        if custom_prompt:
+            # Replace placeholders in custom prompt
+            prompt = custom_prompt.replace('{template}', template)
+            prompt = prompt.replace('{name}', name)
+            prompt = prompt.replace('{company}', company)
+            prompt = prompt.replace('{context}', context if context else 'No additional context provided')
+        else:
+            # Default prompt
+            prompt = f"""Personalize this email template for a specific recipient.
 
 Email Template:
 {template}
@@ -134,26 +156,110 @@ Return ONLY the personalized email content, no additional text or explanations."
             data = response.json()
             personalized_content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
             
-            # Track token usage
+            # Track token usage and cost
             usage = data.get('usage', {})
             prompt_tokens = usage.get('prompt_tokens', 0)
             completion_tokens = usage.get('completion_tokens', 0)
             total_tokens = usage.get('total_tokens', prompt_tokens + completion_tokens)
             
+            # Calculate cost
+            cost_per_1k_tokens = 0.002
+            cost = (total_tokens / 1000) * cost_per_1k_tokens
+            
             # Record usage
             if self.db and self.user_id:
                 from core.quota_manager import QuotaManager
                 from core.observability import ObservabilityManager
+                from database.settings_manager import SettingsManager
                 
                 quota_mgr = QuotaManager(self.db)
+                obs_mgr = ObservabilityManager(self.db)
+                settings = SettingsManager(self.db)
+                
+                # Record token usage
                 quota_mgr.record_llm_usage(self.user_id, total_tokens)
                 
+                # Record cost
+                current_cost = settings.get_setting('llm_cost_this_month', user_id=self.user_id) or '0'
+                try:
+                    new_cost = float(current_cost) + cost
+                    settings.set_setting('llm_cost_this_month', str(new_cost), user_id=self.user_id)
+                except:
+                    pass
+                
                 # Record metric for observability
-                obs_mgr = ObservabilityManager(self.db)
                 obs_mgr.record_metric(self.user_id, 'llm', 'tokens_used', float(total_tokens), {
                     'prompt_tokens': prompt_tokens,
-                    'completion_tokens': completion_tokens
+                    'completion_tokens': completion_tokens,
+                    'cost': cost,
+                    'model': self.model
                 })
+                
+                # Record LLM usage metrics (aggregated by date)
+                try:
+                    from datetime import date
+                    today = date.today()
+                    
+                    use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
+                    if use_supabase:
+                        # Check if record exists for today
+                        result = self.db.supabase.client.table('llm_usage_metrics').select('*').eq('user_id', self.user_id).eq('metric_date', today.isoformat()).execute()
+                        if result.data and len(result.data) > 0:
+                            # Update existing
+                            existing = result.data[0]
+                            self.db.supabase.client.table('llm_usage_metrics').update({
+                                'tokens_used': (existing.get('tokens_used', 0) or 0) + total_tokens,
+                                'api_calls': (existing.get('api_calls', 0) or 0) + 1,
+                                'cost': (existing.get('cost', 0) or 0) + cost
+                            }).eq('id', existing['id']).execute()
+                        else:
+                            # Create new
+                            self.db.supabase.client.table('llm_usage_metrics').insert({
+                                'user_id': self.user_id,
+                                'metric_date': today.isoformat(),
+                                'tokens_used': total_tokens,
+                                'api_calls': 1,
+                                'cost': cost
+                            }).execute()
+                    else:
+                        conn = self.db.connect()
+                        cursor = conn.cursor()
+                        # Ensure table exists
+                        cursor.execute("""
+                            CREATE TABLE IF NOT EXISTS llm_usage_metrics (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                user_id INTEGER,
+                                metric_date DATE NOT NULL,
+                                tokens_used INTEGER DEFAULT 0,
+                                api_calls INTEGER DEFAULT 0,
+                                cost REAL DEFAULT 0.0,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                UNIQUE(user_id, metric_date),
+                                FOREIGN KEY (user_id) REFERENCES users(id)
+                            )
+                        """)
+                        # Check if record exists
+                        cursor.execute("SELECT id, tokens_used, api_calls, cost FROM llm_usage_metrics WHERE user_id = ? AND metric_date = ?", (self.user_id, today))
+                        row = cursor.fetchone()
+                        if row:
+                            # Update existing
+                            cursor.execute("""
+                                UPDATE llm_usage_metrics
+                                SET tokens_used = tokens_used + ?,
+                                    api_calls = api_calls + 1,
+                                    cost = cost + ?
+                                WHERE id = ?
+                            """, (total_tokens, cost, row[0]))
+                        else:
+                            # Create new
+                            cursor.execute("""
+                                INSERT INTO llm_usage_metrics (user_id, metric_date, tokens_used, api_calls, cost, created_at)
+                                VALUES (?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
+                            """, (self.user_id, today, total_tokens, cost))
+                        conn.commit()
+                except Exception as e:
+                    # Table might not exist, that's okay
+                    print(f"Note: Could not record LLM metrics: {e}")
             
             # Clean up the response (remove markdown code blocks if present)
             personalized_content = personalized_content.strip()

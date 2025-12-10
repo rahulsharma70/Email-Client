@@ -25,28 +25,28 @@ class EncryptionManager:
         
         if key_str:
             try:
-                return base64.urlsafe_b64decode(key_str.encode())
-            except:
-                pass
+                # If it's already a valid Fernet key (base64 URL-safe string), use it directly
+                # Fernet key must be 32 bytes when decoded
+                decoded = base64.urlsafe_b64decode(key_str.encode())
+                if len(decoded) == 32:
+                    # Valid key, encode it back to base64 URL-safe for Fernet
+                    return base64.urlsafe_b64encode(decoded)
+                else:
+                    # Invalid length, generate new
+                    print(f"⚠️ Invalid ENCRYPTION_KEY length ({len(decoded)} bytes, expected 32). Generating new key.")
+            except Exception as e:
+                print(f"⚠️ Error decoding ENCRYPTION_KEY: {e}. Generating new key.")
         
-        # Generate new key from master password
-        master_password = os.getenv('MASTER_PASSWORD', 'anagha_solution_default_change_in_production')
-        salt = os.getenv('ENCRYPTION_SALT', 'anagha_solution_salt').encode()
-        
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=100000,
-        )
-        key = base64.urlsafe_b64encode(kdf.derive(master_password.encode()))
+        # Generate new key using Fernet's key generation
+        key = Fernet.generate_key()
         
         # Save to .env for persistence
         try:
             from core.config import Config
             Config._update_env_file('ENCRYPTION_KEY', key.decode())
-        except:
-            pass
+            print(f"✓ Generated and saved new encryption key")
+        except Exception as e:
+            print(f"⚠️ Could not save encryption key to .env: {e}")
         
         return key
     

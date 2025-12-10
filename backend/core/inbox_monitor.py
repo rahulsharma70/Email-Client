@@ -41,6 +41,18 @@ class InboxMonitor:
             return []
         
         account = dict(row)
+        
+        # Decrypt password if encrypted
+        password = account.get('password', '')
+        if password:
+            try:
+                from core.encryption import get_encryption_manager
+                encryptor = get_encryption_manager()
+                password = encryptor.decrypt(password)
+            except:
+                # If decryption fails, might be plaintext from old data
+                pass
+        
         imap_host = account.get('imap_host')
         if not imap_host:
             smtp_host = account.get('host', '')
@@ -51,7 +63,6 @@ class InboxMonitor:
         
         imap_port = int(account.get('imap_port', 993))
         username = account.get('username', '')
-        password = account.get('password', '')
         
         if not imap_host or not username or not password:
             return []

@@ -58,8 +58,15 @@ class AuthManager:
         Register a new user
         
         Returns:
-            Dictionary with user_id and token
+            Dictionary with user_id and verification token (not JWT - email verification token)
         """
+        from core.email_verification import EmailVerificationManager
+        from datetime import datetime
+        
+        email_verification = EmailVerificationManager(self.db)
+        verification_token = email_verification.generate_verification_token()
+        sent_at = datetime.now()
+        
         # Check if using Supabase
         if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
             # Use Supabase methods
@@ -75,7 +82,7 @@ class AuthManager:
                 # Hash password
                 password_hash = self.hash_password(password)
                 
-                # Create user
+                # Create user with email verification fields
                 result = self.db.supabase.client.table('users').insert({
                     'email': email.lower().strip(),
                     'password_hash': password_hash,
@@ -84,7 +91,10 @@ class AuthManager:
                     'company_name': company_name,
                     'subscription_plan': 'free',
                     'is_active': 1,  # INTEGER in Supabase, not boolean
-                    'is_admin': 0    # INTEGER in Supabase, not boolean
+                    'is_admin': 0,    # INTEGER in Supabase, not boolean
+                    'email_verified': 0,  # Not verified yet
+                    'email_verification_token': verification_token,
+                    'email_verification_sent_at': sent_at.isoformat()
                 }).execute()
                 
                 if not result.data or len(result.data) == 0:
@@ -95,14 +105,15 @@ class AuthManager:
                 
                 user_id = result.data[0]['id']
                 
-                # Generate token
-                token = self.generate_token(user_id, email)
+                # Send verification email
+                email_result = email_verification.send_verification_email(email, verification_token, user_id)
                 
                 return {
                     'success': True,
                     'user_id': user_id,
                     'email': email,
-                    'token': token
+                    'email_sent': email_result.get('success', False),
+                    'message': 'Registration successful. Please check your email to verify your account.'
                 }
             except Exception as e:
                 print(f"Error in Supabase registration: {e}")
@@ -134,23 +145,26 @@ class AuthManager:
             # Hash password
             password_hash = self.hash_password(password)
             
-            # Create user
+            # Create user with email verification fields
             cursor.execute("""
-                INSERT INTO users (email, password_hash, first_name, last_name, company_name, subscription_plan)
-                VALUES (?, ?, ?, ?, ?, 'free')
-            """, (email.lower().strip(), password_hash, first_name, last_name, company_name))
+                INSERT INTO users (email, password_hash, first_name, last_name, company_name, subscription_plan,
+                                  email_verified, email_verification_token, email_verification_sent_at)
+                VALUES (?, ?, ?, ?, ?, 'free', 0, ?, ?)
+            """, (email.lower().strip(), password_hash, first_name, last_name, company_name, 
+                  verification_token, sent_at))
             
             user_id = cursor.lastrowid
             conn.commit()
             
-            # Generate token
-            token = self.generate_token(user_id, email)
+            # Send verification email
+            email_result = email_verification.send_verification_email(email, verification_token, user_id)
             
             return {
                 'success': True,
                 'user_id': user_id,
                 'email': email,
-                'token': token
+                'email_sent': email_result.get('success', False),
+                'message': 'Registration successful. Please check your email to verify your account.'
             }
     
     def login_user(self, email: str, password: str) -> Dict:
@@ -168,7 +182,7 @@ class AuthManager:
                 print(f"[DEBUG] Attempting login for email: {email_lower}")
                 
                 result = self.db.supabase.client.table('users').select(
-                    'id, email, password_hash, first_name, last_name, company_name, subscription_plan, is_active, is_admin'
+                    'id, email, password_hash, first_name, last_name, company_name, subscription_plan, is_active, is_admin, email_verified'
                 ).eq('email', email_lower).execute()
                 
                 print(f"[DEBUG] Supabase query result: {len(result.data) if result.data else 0} users found")
@@ -216,6 +230,17 @@ class AuthManager:
                         'error': 'Invalid email or password'
                     }
                 
+                # Check if email is verified
+                email_verified = user.get('email_verified', 0)
+                if isinstance(email_verified, bool):
+                    email_verified = 1 if email_verified else 0
+                if not email_verified:
+                    return {
+                        'success': False,
+                        'error': 'Email not verified. Please check your email and verify your account.',
+                        'email_verified': False
+                    }
+                
                 # Generate token
                 token = self.generate_token(user['id'], user['email'])
                 
@@ -245,7 +270,7 @@ class AuthManager:
             
             cursor.execute("""
                 SELECT id, email, password_hash, first_name, last_name, company_name, 
-                       subscription_plan, is_active, is_admin
+                       subscription_plan, is_active, is_admin, email_verified
                 FROM users WHERE email = ?
             """, (email.lower().strip(),))
             
@@ -270,6 +295,15 @@ class AuthManager:
                 return {
                     'success': False,
                     'error': 'Invalid email or password'
+                }
+            
+            # Check if email is verified
+            email_verified = user.get('email_verified', 0)
+            if not email_verified:
+                return {
+                    'success': False,
+                    'error': 'Email not verified. Please check your email and verify your account.',
+                    'email_verified': False
                 }
             
             # Generate token

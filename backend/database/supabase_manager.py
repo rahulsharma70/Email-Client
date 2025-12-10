@@ -57,7 +57,7 @@ class SupabaseDatabaseManager:
     def create_campaign(self, name: str, subject: str, sender_name: str,
                        sender_email: str, reply_to: str = None, html_content: str = "",
                        template_id: int = None, use_personalization: bool = False,
-                       user_id: int = None) -> int:
+                       user_id: int = None, personalization_prompt: str = None) -> int:
         """Create a new email campaign"""
         data = {
             'name': name,
@@ -69,7 +69,8 @@ class SupabaseDatabaseManager:
             'template_id': template_id,
             'use_personalization': 1 if use_personalization else 0,
             'user_id': user_id,
-            'status': 'draft'
+            'status': 'draft',
+            'personalization_prompt': personalization_prompt
         }
         result = self.supabase.client.table('campaigns').insert(data).execute()
         return result.data[0]['id'] if result.data and len(result.data) > 0 else None
@@ -220,13 +221,25 @@ class SupabaseDatabaseManager:
                        pop3_host: str = None, pop3_port: int = 995,
                        pop3_ssl: bool = True, pop3_leave_on_server: bool = True,
                        save_to_sent: bool = True, **kwargs) -> int:
-        """Add SMTP server"""
+        """Add SMTP server with encrypted password"""
+        from core.encryption import get_encryption_manager
+        encryptor = get_encryption_manager()
+        
+        # Encrypt password
+        encrypted_password = encryptor.encrypt(password) if password else ''
+        
+        # Encrypt OAuth tokens if provided
+        oauth_token = kwargs.get('oauth_token')
+        oauth_refresh_token = kwargs.get('oauth_refresh_token')
+        encrypted_oauth = encryptor.encrypt(oauth_token) if oauth_token else None
+        encrypted_refresh = encryptor.encrypt(oauth_refresh_token) if oauth_refresh_token else None
+        
         data = {
             'name': name,
             'host': host,
             'port': port,
             'username': username,
-            'password': password,  # Should be encrypted in production
+            'password': encrypted_password,  # Encrypted
             'use_tls': 1 if use_tls else 0,
             'use_ssl': 1 if use_ssl else 0,
             'max_per_hour': max_per_hour,
@@ -246,57 +259,112 @@ class SupabaseDatabaseManager:
             'warmup_stage': 0,
             'warmup_emails_sent': 0
         }
-        data.update(kwargs)
+        
+        # Add encrypted OAuth tokens if provided
+        if encrypted_oauth:
+            data['oauth_token'] = encrypted_oauth
+        if encrypted_refresh:
+            data['oauth_refresh_token'] = encrypted_refresh
+        
+        data.update({k: v for k, v in kwargs.items() if k not in ['oauth_token', 'oauth_refresh_token']})
         result = self.supabase.client.table('smtp_servers').insert(data).execute()
         return result.data[0]['id'] if result.data and len(result.data) > 0 else None
     
     def get_smtp_servers(self, active_only: bool = True, user_id: int = None) -> List[Dict]:
-        """Get SMTP servers"""
+        """Get SMTP servers with decrypted passwords"""
         try:
+            from core.encryption import get_encryption_manager
+            encryptor = get_encryption_manager()
+            
             query = self.supabase.client.table('smtp_servers').select('*')
-        if user_id:
+            if user_id:
                 query = query.eq('user_id', user_id)
-        if active_only:
+            if active_only:
                 query = query.eq('is_active', 1)
             query = query.order('is_default', desc=True).order('created_at', desc=False)
             result = query.execute()
-            return result.data if result.data else []
+            
+            servers = result.data if result.data else []
+            
+            # Decrypt passwords
+            for server in servers:
+                if server.get('password'):
+                    try:
+                        server['password'] = encryptor.decrypt(server['password'])
+                    except:
+                        pass  # If decryption fails, keep as-is (might be plaintext from old data)
+                
+                # Decrypt OAuth tokens if present
+                if server.get('oauth_token'):
+                    try:
+                        server['oauth_token'] = encryptor.decrypt(server['oauth_token'])
+                    except:
+                        pass
+                
+                if server.get('oauth_refresh_token'):
+                    try:
+                        server['oauth_refresh_token'] = encryptor.decrypt(server['oauth_refresh_token'])
+                    except:
+                        pass
+            
+            return servers
         except Exception as e:
             print(f"Error getting SMTP servers from Supabase: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def get_default_smtp_server(self) -> Optional[Dict]:
-        """Get default SMTP server"""
+        """Get default SMTP server with decrypted password"""
         try:
+            from core.encryption import get_encryption_manager
+            encryptor = get_encryption_manager()
+            
             # Get default active server
             result = self.supabase.client.table('smtp_servers').select('*').eq('is_default', 1).eq('is_active', 1).limit(1).execute()
             if result.data and len(result.data) > 0:
                 server = result.data[0]
-                # Ensure password is properly decoded
-                if 'password' in server and server['password']:
-                    password = server['password']
-                    if isinstance(password, bytes):
-                        password = password.decode('utf-8')
-                    server['password'] = password
+                # Decrypt password
+                if server.get('password'):
+                    try:
+                        server['password'] = encryptor.decrypt(server['password'])
+                    except:
+                        pass  # If decryption fails, keep as-is
                 return server
             # Fallback to first active server
             result = self.supabase.client.table('smtp_servers').select('*').eq('is_active', 1).limit(1).execute()
             if result.data and len(result.data) > 0:
                 server = result.data[0]
-                # Ensure password is properly decoded
-                if 'password' in server and server['password']:
-                    password = server['password']
-                    if isinstance(password, bytes):
-                        password = password.decode('utf-8')
-                    server['password'] = password
+                # Decrypt password
+                if server.get('password'):
+                    try:
+                        server['password'] = encryptor.decrypt(server['password'])
+                    except:
+                        pass  # If decryption fails, keep as-is
                 return server
             return None
         except Exception as e:
             print(f"Error getting default SMTP server from Supabase: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def update_smtp_server(self, server_id: int, data: Dict):
-        """Update SMTP server"""
+        """Update SMTP server with encrypted password if provided"""
+        from core.encryption import get_encryption_manager
+        encryptor = get_encryption_manager()
+        
+        # Encrypt password if provided
+        if 'password' in data and data['password']:
+            data['password'] = encryptor.encrypt(data['password'])
+        
+        # Encrypt OAuth tokens if provided
+        if 'oauth_token' in data and data['oauth_token']:
+            data['oauth_token'] = encryptor.encrypt(data['oauth_token'])
+        
+        if 'oauth_refresh_token' in data and data['oauth_refresh_token']:
+            data['oauth_refresh_token'] = encryptor.encrypt(data['oauth_refresh_token'])
+        
         self.supabase.client.table('smtp_servers').update(data).eq('id', server_id).execute()
     
     # Email queue methods
