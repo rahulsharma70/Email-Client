@@ -365,130 +365,225 @@ Return ONLY the JSON array, no additional text."""
             scraping_job_id: Optional scraping job ID
             user_id: User ID for multi-tenant support
         """
-        conn = self.db.connect()
-        cursor = conn.cursor()
-
-        saved_count = 0
-        skipped_count = 0
-        
-        for lead in leads:
-            try:
-                email = lead.get('email', '').lower().strip()
-                if not email:
-                    continue
-                
-                # Check if lead already exists (by email and optionally user_id)
-                if user_id:
-                    cursor.execute("""
-                        SELECT id, is_verified, follow_up_count FROM leads 
-                        WHERE email = ? AND user_id = ?
-                    """, (email, user_id))
-                else:
-                    cursor.execute("""
-                        SELECT id, is_verified, follow_up_count FROM leads 
-                        WHERE email = ?
-                    """, (email,))
-                
-                existing = cursor.fetchone()
-                
-                if existing:
-                    # Lead exists - update if needed, increment follow_up_count if from new source
-                    existing_id = existing[0]
-                    existing_verified = existing[1]
-                    follow_up_count = (existing[2] or 0) + 1
+        # Check if using Supabase
+        if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
+            # Use Supabase methods
+            saved_count = 0
+            skipped_count = 0
+            
+            for lead in leads:
+                try:
+                    email = lead.get('email', '').lower().strip()
+                    if not email:
+                        skipped_count += 1
+                        continue
                     
-                    # Update follow-up count and source if from scraping
-                    if scraping_job_id:
+                    # Check if lead exists
+                    filters = {'email': email}
+                    if user_id:
+                        filters['user_id'] = user_id
+                    
+                    existing_result = self.db.supabase.client.table('leads').select('id,is_verified,follow_up_count').eq('email', email)
+                    if user_id:
+                        existing_result = existing_result.eq('user_id', user_id)
+                    existing_result = existing_result.execute()
+                    existing = existing_result.data[0] if existing_result.data and len(existing_result.data) > 0 else None
+                    
+                    if existing:
+                        # Lead exists - update follow-up count
+                        follow_up_count = (existing.get('follow_up_count') or 0) + 1
+                        update_data = {'follow_up_count': follow_up_count}
+                        
+                        if scraping_job_id:
+                            source = lead.get('source', 'scraper')
+                            # Only update source if it doesn't already have scraper_job_ prefix
+                            current_source = lead.get('source', '')
+                            if not current_source.startswith('scraper_job_'):
+                                update_data['source'] = source
+                        
+                        self.db.supabase.client.table('leads').update(update_data).eq('id', existing['id']).execute()
+                        skipped_count += 1
+                        continue
+                    
+                    # New lead - insert it
+                    data = {
+                        'name': lead.get('name', ''),
+                        'company_name': lead.get('company_name', ''),
+                        'domain': lead.get('domain', ''),
+                        'email': email,
+                        'title': lead.get('title', ''),
+                        'source': lead.get('source', 'scraper'),
+                        'follow_up_count': 0,
+                        'is_verified': 0,
+                        'verification_status': 'pending'
+                    }
+                    if user_id:
+                        data['user_id'] = user_id
+                    
+                    self.db.supabase.client.table('leads').insert(data).execute()
+                    saved_count += 1
+                except Exception as e:
+                    print(f"Error saving lead {lead.get('name', 'unknown')}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+            
+            return {'saved': saved_count, 'skipped': skipped_count, 'total': saved_count + skipped_count}
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+
+            saved_count = 0
+            skipped_count = 0
+            
+            for lead in leads:
+                try:
+                    email = lead.get('email', '').lower().strip()
+                    if not email:
+                        continue
+                    
+                    # Check if lead already exists (by email and optionally user_id)
+                    if user_id:
                         cursor.execute("""
-                            UPDATE leads 
-                            SET follow_up_count = ?,
-                                source = CASE 
-                                    WHEN source NOT LIKE 'scraper_job_%' THEN ?
-                                    ELSE source
-                                END,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                        """, (follow_up_count, lead.get('source', 'scraper'), existing_id))
+                            SELECT id, is_verified, follow_up_count FROM leads 
+                            WHERE email = ? AND user_id = ?
+                        """, (email, user_id))
                     else:
                         cursor.execute("""
-                            UPDATE leads 
-                            SET follow_up_count = ?,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                        """, (follow_up_count, existing_id))
+                            SELECT id, is_verified, follow_up_count FROM leads 
+                            WHERE email = ?
+                        """, (email,))
                     
-                    skipped_count += 1
+                    existing = cursor.fetchone()
+                    
+                    if existing:
+                        # Lead exists - update if needed, increment follow_up_count if from new source
+                        existing_id = existing[0]
+                        existing_verified = existing[1]
+                        follow_up_count = (existing[2] or 0) + 1
+                        
+                        # Update follow-up count and source if from scraping
+                        if scraping_job_id:
+                            cursor.execute("""
+                                UPDATE leads 
+                                SET follow_up_count = ?,
+                                    source = CASE 
+                                        WHEN source NOT LIKE 'scraper_job_%' THEN ?
+                                        ELSE source
+                                    END,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE id = ?
+                            """, (follow_up_count, lead.get('source', 'scraper'), existing_id))
+                        else:
+                            cursor.execute("""
+                                UPDATE leads 
+                                SET follow_up_count = ?,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE id = ?
+                            """, (follow_up_count, existing_id))
+                        
+                        skipped_count += 1
+                        continue
+                    # New lead - insert it
+                    if user_id:
+                        cursor.execute("""
+                            INSERT INTO leads (name, company_name, domain, email, title, source, user_id, follow_up_count)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                        """, (
+                            lead.get('name', ''),
+                            lead.get('company_name', ''),
+                            lead.get('domain', ''),
+                            email,
+                            lead.get('title', ''),
+                            lead.get('source', 'scraper'),
+                            user_id
+                        ))
+                    else:
+                        cursor.execute("""
+                            INSERT INTO leads (name, company_name, domain, email, title, source, follow_up_count)
+                            VALUES (?, ?, ?, ?, ?, ?, 0)
+                        """, (
+                            lead.get('name', ''),
+                            lead.get('company_name', ''),
+                            lead.get('domain', ''),
+                            email,
+                            lead.get('title', ''),
+                            lead.get('source', 'scraper')
+                        ))
+                    saved_count += 1
+                except Exception as e:
+                    print(f"Error saving lead {lead.get('name', 'unknown')}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
-                
-                # New lead - insert it
-                if user_id:
-                    cursor.execute("""
-                        INSERT INTO leads (name, company_name, domain, email, title, source, user_id, follow_up_count)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-                    """, (
-                        lead.get('name', ''),
-                        lead.get('company_name', ''),
-                        lead.get('domain', ''),
-                        email,
-                        lead.get('title', ''),
-                        lead.get('source', 'scraper'),
-                        user_id
-                    ))
-                else:
-                    cursor.execute("""
-                        INSERT INTO leads (name, company_name, domain, email, title, source, follow_up_count)
-                        VALUES (?, ?, ?, ?, ?, ?, 0)
-                    """, (
-                        lead.get('name', ''),
-                        lead.get('company_name', ''),
-                        lead.get('domain', ''),
-                        email,
-                        lead.get('title', ''),
-                        lead.get('source', 'scraper')
-                    ))
-                saved_count += 1
-            except Exception as e:
-                print(f"Error saving lead {lead.get('name', 'unknown')}: {e}")
-                continue
 
-        conn.commit()
-        return {'saved': saved_count, 'skipped': skipped_count, 'total': saved_count + skipped_count}
+            conn.commit()
+            return {'saved': saved_count, 'skipped': skipped_count, 'total': saved_count + skipped_count}
 
-    def run_full_scraping_job(self, icp_description: str, job_id: int = None) -> Dict:
+    def run_full_scraping_job(self, icp_description: str, job_id: int = None, user_id: int = None) -> Dict:
         """
         Run complete scraping job: ICP -> Companies -> Decision Makers -> Email Patterns -> Verification
         
         Args:
             icp_description: ICP description
             job_id: Optional job ID (if None, creates new job)
+            user_id: User ID for multi-tenant support
         """
-        conn = self.db.connect()
-        cursor = conn.cursor()
-        
-        if job_id is None:
-            cursor.execute("""
-                INSERT INTO lead_scraping_jobs (icp_description, status)
-                VALUES (?, 'running')
-            """, (icp_description,))
-            job_id = cursor.lastrowid
-            conn.commit()
+        # Check if using Supabase
+        if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
+            # Use Supabase methods
+            if job_id is None:
+                job_id = self.db.create_scraping_job(icp_description, user_id)
+            else:
+                # Update existing job
+                self.db.update_scraping_job(job_id, status='running', current_step='Starting...', progress_percent=0)
+                
+                # Get user_id from job if not provided
+                if user_id is None:
+                    user_id = self.db.get_scraping_job_user_id(job_id)
         else:
-            # Update existing job
-            cursor.execute("""
-                UPDATE lead_scraping_jobs 
-                SET status = 'running', current_step = 'Starting...', progress_percent = 0
-                WHERE id = ?
-            """, (job_id,))
-            conn.commit()
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            if job_id is None:
+                cursor.execute("""
+                    INSERT INTO lead_scraping_jobs (icp_description, status, user_id)
+                    VALUES (?, 'running', ?)
+                """, (icp_description, user_id))
+                job_id = cursor.lastrowid
+                conn.commit()
+            else:
+                # Update existing job
+                cursor.execute("""
+                    UPDATE lead_scraping_jobs 
+                    SET status = 'running', current_step = 'Starting...', progress_percent = 0
+                    WHERE id = ?
+                """, (job_id,))
+                conn.commit()
+                
+                # Get user_id from job if not provided
+                if user_id is None:
+                    cursor.execute("SELECT user_id FROM lead_scraping_jobs WHERE id = ?", (job_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        user_id = row[0]
 
         try:
+            # Check if using Supabase
+            use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
+            
             # Update progress: Starting
-            cursor.execute("""
-                UPDATE lead_scraping_jobs 
-                SET status = 'running', current_step = 'Extracting companies from ICP...', progress_percent = 5
-                WHERE id = ?
-            """, (job_id,))
-            conn.commit()
+            if use_supabase:
+                self.db.update_scraping_job(job_id, status='running', current_step='Extracting companies from ICP...', progress_percent=5)
+            else:
+                cursor.execute("""
+                    UPDATE lead_scraping_jobs 
+                    SET status = 'running', current_step = 'Extracting companies from ICP...', progress_percent = 5
+                    WHERE id = ?
+                """, (job_id,))
+                conn.commit()
             
             # Step 1: Extract companies
             print("Step 1: Extracting companies from ICP...")
@@ -496,12 +591,15 @@ Return ONLY the JSON array, no additional text."""
             print(f"Found {len(companies)} companies")
             
             # Update progress: Companies found
-            cursor.execute("""
-                UPDATE lead_scraping_jobs 
-                SET companies_found = ?, current_step = 'Extracting decision makers...', progress_percent = 20
-                WHERE id = ?
-            """, (len(companies), job_id))
-            conn.commit()
+            if use_supabase:
+                self.db.update_scraping_job(job_id, companies_found=len(companies), current_step='Extracting decision makers...', progress_percent=20)
+            else:
+                cursor.execute("""
+                    UPDATE lead_scraping_jobs 
+                    SET companies_found = ?, current_step = 'Extracting decision makers...', progress_percent = 20
+                    WHERE id = ?
+                """, (len(companies), job_id))
+                conn.commit()
 
             # Step 2: Extract decision makers for each company
             all_leads = []
@@ -517,13 +615,17 @@ Return ONLY the JSON array, no additional text."""
                 print(f"Extracting decision makers from {company_name} ({company_domain})...")
                 
                 # Update progress for decision maker extraction
-                progress = 20 + int((idx / total_companies) * 40)  # 20-60%
-                cursor.execute("""
-                    UPDATE lead_scraping_jobs 
-                    SET current_step = ?, progress_percent = ?
-                    WHERE id = ?
-                """, (f'Extracting decision makers from {company_name}... ({idx+1}/{total_companies})', progress, job_id))
-                conn.commit()
+                progress = 20 + int((idx / total_companies) * 40) if total_companies > 0 else 20  # 20-60%
+                step_msg = f'Extracting decision makers from {company_name}... ({idx+1}/{total_companies})'
+                if use_supabase:
+                    self.db.update_scraping_job(job_id, current_step=step_msg, progress_percent=progress)
+                else:
+                    cursor.execute("""
+                        UPDATE lead_scraping_jobs 
+                        SET current_step = ?, progress_percent = ?
+                        WHERE id = ?
+                    """, (step_msg, progress, job_id))
+                    conn.commit()
                 
                 decision_makers = self.extract_decision_makers(company_name, company_domain)
 
@@ -559,42 +661,55 @@ Return ONLY the JSON array, no additional text."""
                 time.sleep(1)
 
             # Step 4: Save leads to database
-            cursor.execute("""
-                UPDATE lead_scraping_jobs 
-                SET current_step = 'Saving leads to database...', progress_percent = 60
-                WHERE id = ?
-            """, (job_id,))
-            conn.commit()
-            
-            # Get user_id from job if available
-            cursor.execute("SELECT user_id FROM lead_scraping_jobs WHERE id = ?", (job_id,))
-            job_row = cursor.fetchone()
-            user_id = job_row[0] if job_row and len(job_row) > 0 else None
+            if use_supabase:
+                self.db.update_scraping_job(job_id, current_step='Saving leads to database...', progress_percent=60)
+                # Get user_id from job if available
+                if user_id is None:
+                    user_id = self.db.get_scraping_job_user_id(job_id)
+            else:
+                cursor.execute("""
+                    UPDATE lead_scraping_jobs 
+                    SET current_step = 'Saving leads to database...', progress_percent = 60
+                    WHERE id = ?
+                """, (job_id,))
+                conn.commit()
+                
+                # Get user_id from job if available
+                cursor.execute("SELECT user_id FROM lead_scraping_jobs WHERE id = ?", (job_id,))
+                job_row = cursor.fetchone()
+                user_id = job_row[0] if job_row and len(job_row) > 0 else None
             
             print(f"Saving {len(all_leads)} leads to database...")
             result = self.save_leads_to_database(all_leads, job_id, user_id=user_id)
             saved_count = result.get('saved', 0) if isinstance(result, dict) else result
             
             # Step 5: Validate leads immediately after saving
-            cursor.execute("""
-                UPDATE lead_scraping_jobs 
-                SET current_step = 'Validating leads...', progress_percent = 65
-                WHERE id = ?
-            """, (job_id,))
-            conn.commit()
+            if use_supabase:
+                self.db.update_scraping_job(job_id, current_step='Validating leads...', progress_percent=65)
+            else:
+                cursor.execute("""
+                    UPDATE lead_scraping_jobs 
+                    SET current_step = 'Validating leads...', progress_percent = 65
+                    WHERE id = ?
+                """, (job_id,))
+                conn.commit()
             
             print(f"Validating {saved_count} leads...")
             from core.email_verifier import EmailVerifier
             verifier = EmailVerifier(self.db)
             
             # Get all lead IDs that were just saved
-            cursor.execute("""
-                SELECT id FROM leads 
-                WHERE source = ? 
-                ORDER BY id DESC 
-                LIMIT ?
-            """, (f'scraper_job_{job_id}', saved_count))
-            lead_ids = [row[0] for row in cursor.fetchall()]
+            if use_supabase:
+                leads_result = self.db.get_recent_leads_by_source(f'scraper_job_{job_id}', limit=saved_count)
+                lead_ids = [lead['id'] for lead in leads_result]
+            else:
+                cursor.execute("""
+                    SELECT id FROM leads 
+                    WHERE source = ? 
+                    ORDER BY id DESC 
+                    LIMIT ?
+                """, (f'scraper_job_{job_id}', saved_count))
+                lead_ids = [row[0] for row in cursor.fetchall()]
             
             # Validate each lead
             verified_count = 0
@@ -607,19 +722,18 @@ Return ONLY the JSON array, no additional text."""
                     
                     # Update progress in database (65-95%)
                     progress = 65 + int((idx / total_leads) * 30) if total_leads > 0 else 65
-                    cursor.execute("""
-                        UPDATE lead_scraping_jobs 
-                        SET verified_leads = ?, 
-                            current_step = ?,
-                            progress_percent = ?
-                        WHERE id = ?
-                    """, (
-                        verified_count, 
-                        f'Validating leads... ({idx+1}/{total_leads} verified: {verified_count})',
-                        progress,
-                        job_id
-                    ))
-                    conn.commit()
+                    step_msg = f'Validating leads... ({idx+1}/{total_leads} verified: {verified_count})'
+                    if use_supabase:
+                        self.db.update_scraping_job(job_id, verified_leads=verified_count, current_step=step_msg, progress_percent=progress)
+                    else:
+                        cursor.execute("""
+                            UPDATE lead_scraping_jobs 
+                            SET verified_leads = ?, 
+                                current_step = ?,
+                                progress_percent = ?
+                            WHERE id = ?
+                        """, (verified_count, step_msg, progress, job_id))
+                        conn.commit()
                     
                     # Small delay to avoid overwhelming mail servers
                     time.sleep(0.5)
@@ -628,18 +742,30 @@ Return ONLY the JSON array, no additional text."""
                     continue
 
             # Step 6: Update job status - completed
-            cursor.execute("""
-                UPDATE lead_scraping_jobs 
-                SET status = 'completed', 
-                    companies_found = ?,
-                    leads_found = ?,
-                    verified_leads = ?,
-                    current_step = 'Completed',
-                    progress_percent = 100,
-                    completed_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """, (len(companies), saved_count, verified_count, job_id))
-            conn.commit()
+            if use_supabase:
+                from datetime import datetime
+                self.db.update_scraping_job(job_id, 
+                    status='completed',
+                    companies_found=len(companies),
+                    leads_found=saved_count,
+                    verified_leads=verified_count,
+                    current_step='Completed',
+                    progress_percent=100,
+                    completed_at=datetime.now().isoformat()
+                )
+            else:
+                cursor.execute("""
+                    UPDATE lead_scraping_jobs 
+                    SET status = 'completed', 
+                        companies_found = ?,
+                        leads_found = ?,
+                        verified_leads = ?,
+                        current_step = 'Completed',
+                        progress_percent = 100,
+                        completed_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (len(companies), saved_count, verified_count, job_id))
+                conn.commit()
 
             return {
                 'job_id': job_id,
@@ -650,14 +776,21 @@ Return ONLY the JSON array, no additional text."""
             }
 
         except Exception as e:
-            # Update job status to failed and do not raise raw Perplexity errors upward
+            # Update job status to failed
             print("Unexpected error in full scraping job:", e)
-            cursor.execute("""
-                UPDATE lead_scraping_jobs 
-                SET status = 'failed'
-                WHERE id = ?
-            """, (job_id,))
-            conn.commit()
+            import traceback
+            traceback.print_exc()
+            
+            use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
+            if use_supabase:
+                self.db.update_scraping_job(job_id, status='failed')
+            else:
+                cursor.execute("""
+                    UPDATE lead_scraping_jobs 
+                    SET status = 'failed'
+                    WHERE id = ?
+                """, (job_id,))
+                conn.commit()
             return {
                 'job_id': job_id,
                 'companies_found': 0,

@@ -1,261 +1,534 @@
-# Deployment Guide - ANAGHA SOLUTION
+# Complete SaaS Deployment Guide
 
-## Overview
-This guide covers deploying ANAGHA SOLUTION to Railway or Render with Supabase backend.
+## 🚀 Production-Ready Deployment for ANAGHA SOLUTION
 
-## Prerequisites
+This guide provides step-by-step instructions to deploy the complete multi-tenant SaaS email platform.
 
-1. **Supabase Account**
-   - Create account at https://supabase.com
+---
+
+## 📋 Prerequisites
+
+1. **Supabase Account** (Free tier available)
+   - Sign up at https://supabase.com
    - Create a new project
-   - Get your project URL and API key
+   - Note your Project URL and API Key
 
-2. **GitHub Repository**
-   - Push your code to GitHub
-   - Repository should be public or connected to deployment platform
+2. **Redis Instance** (for Celery workers)
+   - Option A: Redis Cloud (free tier)
+   - Option B: Railway/Render Redis addon
+   - Option C: Self-hosted Redis
 
-3. **API Keys**
-   - Perplexity API key (for lead scraping)
-   - OpenRouter API key (for email personalization)
-   - Stripe API key (for billing)
-   - Redis URL (for Celery workers)
+3. **Deployment Platform** (choose one):
+   - **Railway** (recommended - easiest)
+   - **Render** (good alternative)
+   - **Heroku** (legacy)
+   - **AWS/GCP/Azure** (advanced)
 
-## Supabase Setup
+4. **Domain Name** (optional but recommended)
+   - For production use
 
-### 1. Create Supabase Project
-1. Go to https://supabase.com
-2. Create new project
-3. Wait for database to initialize
-4. Go to Settings > API
-5. Copy:
-   - Project URL
-   - `anon` key (for client-side)
-   - `service_role` key (for server-side - keep secret!)
+5. **Stripe Account** (for billing)
+   - Sign up at https://stripe.com
+   - Get API keys from dashboard
 
-### 2. Run Database Migrations
-The application will automatically create tables on first run, or you can run migrations manually:
+---
 
-```sql
--- Create users table
-CREATE TABLE users (
-    id SERIAL PRIMARY KEY,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    first_name TEXT,
-    last_name TEXT,
-    company_name TEXT,
-    is_active INTEGER DEFAULT 1,
-    is_admin INTEGER DEFAULT 0,
-    subscription_plan TEXT DEFAULT 'free',
-    stripe_customer_id TEXT,
-    stripe_subscription_id TEXT,
-    subscription_status TEXT DEFAULT 'active',
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
-);
+## 🔧 Step 1: Local Setup & Testing
 
--- Create other tables similarly
--- (See database/db_manager.py for full schema)
+### 1.1 Clone and Install
+
+```bash
+# Clone repository
+git clone <your-repo-url>
+cd Email-Client
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-## Railway Deployment
+### 1.2 Configure Environment Variables
 
-### Option 1: Railway CLI
+Create `.env` file in project root:
 
-1. **Install Railway CLI**
-   ```bash
-   npm i -g @railway/cli
-   ```
+```bash
+# Database Configuration
+DATABASE_TYPE=supabase  # or 'sqlite' for local dev
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-anon-key-here
 
-2. **Login**
-   ```bash
-   railway login
-   ```
+# JWT Secret (generate a strong random string)
+JWT_SECRET_KEY=your-super-secret-jwt-key-change-this-in-production
 
-3. **Initialize Project**
-   ```bash
-   railway init
-   ```
+# Redis Configuration
+REDIS_URL=redis://localhost:6379/0  # For local dev
+# For production: redis://:password@host:port/0
 
-4. **Add Environment Variables**
-   ```bash
-   railway variables set SUPABASE_URL=https://xxxxx.supabase.co
-   railway variables set SUPABASE_KEY=your_supabase_key
-   railway variables set JWT_SECRET_KEY=your_jwt_secret
-   railway variables set STRIPE_SECRET_KEY=sk_...
-   railway variables set REDIS_URL=redis://...
-   railway variables set PERPLEXITY_API_KEY=...
-   railway variables set OPENROUTER_API_KEY=...
-   ```
+# API Keys
+PERPLEXITY_API_KEY=your-perplexity-api-key
+OPENROUTER_API_KEY=your-openrouter-api-key
+OPENROUTER_MODEL=openai/gpt-4-turbo-preview
 
-5. **Deploy**
-   ```bash
-   railway up
-   ```
+# Email Verification (optional)
+EMAIL_VERIFICATION_PROVIDER=zerobounce  # or 'smtp'
+EMAIL_VERIFICATION_API_KEY=your-zerobounce-key
 
-### Option 2: GitHub Integration
+# Stripe Configuration
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_PUBLISHABLE_KEY=pk_test_...
 
-1. Go to https://railway.app
-2. Click "New Project"
-3. Select "Deploy from GitHub repo"
-4. Choose your repository
-5. Add environment variables in Railway dashboard
-6. Railway will auto-deploy on push
+# Encryption Key (auto-generated, but can set manually)
+ENCRYPTION_KEY=your-32-byte-base64-encoded-key
 
-### Railway Configuration
+# Deployment URL (for production)
+DEPLOYMENT_URL=https://your-domain.com
+```
 
-The `railway.json` file is already configured:
-- Uses Dockerfile for builds
-- Runs with Gunicorn
-- Auto-restarts on failure
+### 1.3 Initialize Supabase Database
 
-## Render Deployment
+**Option A: Automatic (if service key available)**
 
-1. **Go to Render**
-   - Visit https://render.com
-   - Sign up/login
+```bash
+python3 backend/database/init_supabase.py
+```
 
-2. **Create Web Service**
-   - Click "New" > "Web Service"
-   - Connect your GitHub repository
-   - Select the repository
+**Option B: Manual (recommended for first time)**
 
-3. **Configure Service**
-   - **Name**: anagha-solution (or your choice)
-   - **Region**: Choose closest to your users
-   - **Branch**: main (or your default branch)
-   - **Root Directory**: / (root)
-   - **Environment**: Python 3
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `gunicorn --bind 0.0.0.0:$PORT --workers 4 --threads 2 --timeout 120 web_app:app`
+1. Go to Supabase Dashboard → SQL Editor
+2. Open `supabase_migration.sql` (generated automatically)
+3. Copy all SQL statements
+4. Paste into SQL Editor
+5. Click "Run"
 
-4. **Add Environment Variables**
-   In Render dashboard, go to Environment section:
-   ```
-   SUPABASE_URL=https://xxxxx.supabase.co
-   SUPABASE_KEY=your_supabase_key
-   JWT_SECRET_KEY=your_jwt_secret
-   STRIPE_SECRET_KEY=sk_...
-   REDIS_URL=redis://...
-   PERPLEXITY_API_KEY=...
-   OPENROUTER_API_KEY=...
-   OPENROUTER_MODEL=openai/gpt-4
-   DATABASE_TYPE=supabase
-   FLASK_APP=web_app.py
-   PYTHONUNBUFFERED=1
-   ```
+**Verify tables created:**
+- Go to Supabase Dashboard → Table Editor
+- You should see: `users`, `leads`, `campaigns`, `recipients`, `smtp_servers`, etc.
 
-5. **Deploy**
-   - Click "Create Web Service"
-   - Wait for build to complete
-   - Your app will be live at `https://your-app.onrender.com`
+### 1.4 Test Locally
 
-## Environment Variables
+```bash
+# Start Redis (if local)
+redis-server
 
-### Required Variables
+# Start Celery worker (in separate terminal)
+celery -A backend.core.celery_app worker --loglevel=info
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `SUPABASE_URL` | Supabase project URL | `https://xxxxx.supabase.co` |
-| `SUPABASE_KEY` | Supabase API key | `eyJhbGc...` |
-| `JWT_SECRET_KEY` | Secret for JWT tokens | Random string |
-| `DATABASE_TYPE` | Database type | `supabase` or `sqlite` |
+# Start Flask app
+cd backend
+python web_app.py
+```
 
-### Optional Variables
+Visit: http://localhost:5001
 
-| Variable | Description |
-|----------|-------------|
-| `STRIPE_SECRET_KEY` | Stripe API key for billing |
-| `REDIS_URL` | Redis connection for Celery |
-| `PERPLEXITY_API_KEY` | Perplexity API for lead scraping |
-| `OPENROUTER_API_KEY` | OpenRouter API for personalization |
-| `OPENROUTER_MODEL` | Model to use (default: `openai/gpt-4`) |
+---
 
-## Post-Deployment
+## 🌐 Step 2: Deploy to Railway (Recommended)
 
-### 1. Verify Deployment
-- Visit your deployment URL
-- Check if app loads
-- Test registration/login
+### 2.1 Setup Railway Account
 
-### 2. Configure Settings
-- Go to Settings page in the app
-- Configure Supabase connection
-- Add API keys
-- Test database connection
+1. Sign up at https://railway.app
+2. Install Railway CLI: `npm i -g @railway/cli`
+3. Login: `railway login`
 
-### 3. Set Up Celery Workers (Optional)
-For background tasks, deploy Celery workers:
+### 2.2 Create Railway Project
 
-**Railway:**
-- Create new service
-- Use same environment variables
-- Start command: `celery -A core.celery_app worker --loglevel=info`
+```bash
+# In project root
+railway init
 
-**Render:**
-- Create Background Worker
-- Start command: `celery -A core.celery_app worker --loglevel=info`
+# Link to existing project (if you have one)
+railway link
+```
 
-### 4. Set Up Redis (Optional)
-- Railway: Add Redis service
-- Render: Use Redis addon
-- Update `REDIS_URL` environment variable
+### 2.3 Add Services
 
-## Troubleshooting
+**Add Redis:**
+```bash
+railway add redis
+```
 
-### Database Connection Issues
-- Verify Supabase URL and key
-- Check Supabase project is active
-- Ensure tables are created
+**Add PostgreSQL (optional, if not using Supabase):**
+```bash
+railway add postgresql
+```
 
-### Build Failures
-- Check Python version (3.11+)
-- Verify all dependencies in requirements.txt
-- Check build logs for errors
+### 2.4 Configure Environment Variables
 
-### Runtime Errors
-- Check environment variables are set
-- Verify Redis connection (if using Celery)
-- Check application logs
+In Railway Dashboard → Variables, add:
 
-## Monitoring
+```env
+DATABASE_TYPE=supabase
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-anon-key
+JWT_SECRET_KEY=your-secret-key
+REDIS_URL=${{Redis.REDIS_URL}}  # Auto-filled from Redis service
+PERPLEXITY_API_KEY=your-key
+OPENROUTER_API_KEY=your-key
+STRIPE_SECRET_KEY=your-key
+STRIPE_PUBLISHABLE_KEY=your-key
+ENCRYPTION_KEY=your-key
+DEPLOYMENT_URL=https://your-app.railway.app
+```
 
-### Railway
-- View logs in Railway dashboard
-- Set up alerts for errors
-- Monitor resource usage
+### 2.5 Create Railway Configuration
 
-### Render
-- View logs in Render dashboard
-- Set up health checks
-- Monitor metrics
+Create `railway.json`:
 
-## Custom Domain
+```json
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "buildCommand": "pip install -r requirements.txt"
+  },
+  "deploy": {
+    "startCommand": "cd backend && gunicorn -w 4 -b 0.0.0.0:$PORT web_app:app",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
+```
 
-### Railway
-1. Go to project settings
-2. Add custom domain
-3. Configure DNS records
+### 2.6 Deploy
 
-### Render
-1. Go to service settings
-2. Add custom domain
-3. Configure DNS records
+```bash
+# Deploy
+railway up
 
-## Security Notes
+# Or connect GitHub repo for auto-deploy
+railway github
+```
+
+### 2.7 Setup Celery Worker
+
+Create separate Railway service for Celery:
+
+```bash
+# Create new service
+railway service create celery-worker
+
+# Set start command
+railery service set startCommand "celery -A backend.core.celery_app worker --loglevel=info"
+
+# Deploy
+railway up
+```
+
+---
+
+## 🌐 Step 3: Deploy to Render (Alternative)
+
+### 3.1 Setup Render Account
+
+1. Sign up at https://render.com
+2. Connect GitHub repository
+
+### 3.2 Create Web Service
+
+1. Dashboard → New → Web Service
+2. Connect your repository
+3. Configure:
+
+**Build Command:**
+```bash
+pip install -r requirements.txt
+```
+
+**Start Command:**
+```bash
+cd backend && gunicorn -w 4 -b 0.0.0.0:$PORT web_app:app
+```
+
+**Environment Variables:**
+- Add all variables from `.env` file
+- Set `PORT=10000` (Render auto-assigns)
+
+### 3.3 Create Redis Instance
+
+1. Dashboard → New → Redis
+2. Note connection URL
+3. Add to environment variables as `REDIS_URL`
+
+### 3.4 Create Celery Worker Service
+
+1. Dashboard → New → Background Worker
+2. Same repository
+3. Start Command:
+```bash
+celery -A backend.core.celery_app worker --loglevel=info
+```
+4. Add same environment variables
+
+### 3.5 Deploy
+
+- Render auto-deploys on git push
+- Or manually trigger from dashboard
+
+---
+
+## 🔐 Step 4: Security Configuration
+
+### 4.1 Update JWT Secret
+
+Generate strong secret:
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Add to environment variables.
+
+### 4.2 Enable HTTPS
+
+- Railway: Automatic with custom domain
+- Render: Automatic with custom domain
+- Add custom domain in platform dashboard
+
+### 4.3 Configure CORS
+
+Update `backend/web_app.py`:
+```python
+CORS(app, resources={
+    r"/*": {
+        "origins": ["https://your-domain.com"],
+        "methods": ["GET", "POST", "PUT", "DELETE"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
+```
+
+### 4.4 Set Up Rate Limiting
+
+Already configured in code. Adjust in `backend/core/rate_limiter.py` if needed.
+
+---
+
+## 📊 Step 5: Initialize Database (Production)
+
+### 5.1 Run Migration
+
+**Option A: Via Script**
+```bash
+python3 backend/database/init_supabase.py
+```
+
+**Option B: Via Supabase Dashboard**
+1. Go to Supabase Dashboard → SQL Editor
+2. Run `supabase_migration.sql`
+
+### 5.2 Verify Tables
+
+Check Supabase Dashboard → Table Editor:
+- ✓ users
+- ✓ leads
+- ✓ campaigns
+- ✓ recipients
+- ✓ smtp_servers
+- ✓ email_queue
+- ✓ templates
+- ✓ email_tracking
+- ✓ daily_stats
+- ✓ app_settings
+- ✓ llm_usage_metrics
+- ✓ observability_metrics
+- ✓ alerts
+
+---
+
+## 🧪 Step 6: Test Deployment
+
+### 6.1 Health Check
+
+```bash
+curl https://your-app.railway.app/health
+```
+
+Expected: `{"status": "ok", "message": "..."}`
+
+### 6.2 Test Registration
+
+```bash
+curl -X POST https://your-app.railway.app/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "test@example.com",
+    "password": "testpass123",
+    "first_name": "Test",
+    "last_name": "User"
+  }'
+```
+
+Expected: `{"success": true, "token": "...", "user_id": 1}`
+
+### 6.3 Test Login
+
+```bash
+curl -X POST https://your-app.railway.app/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "test@example.com",
+    "password": "testpass123"
+  }'
+```
+
+Expected: `{"success": true, "token": "...", "user": {...}}`
+
+### 6.4 Test Protected Endpoint
+
+```bash
+curl https://your-app.railway.app/api/auth/me \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## 🔄 Step 7: Continuous Deployment
+
+### 7.1 GitHub Actions (Optional)
+
+Create `.github/workflows/deploy.yml`:
+
+```yaml
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-python@v2
+      - name: Deploy to Railway
+        run: |
+          npm i -g @railway/cli
+          railway up
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+```
+
+### 7.2 Environment Variables in CI/CD
 
 - Never commit `.env` file
-- Use service role key only server-side
-- Rotate JWT secret regularly
-- Use HTTPS (enabled by default on Railway/Render)
-- Set up rate limiting
-- Monitor for suspicious activity
+- Store secrets in platform's secret management
+- Use GitHub Secrets for CI/CD
 
-## Support
+---
 
-For issues:
-1. Check application logs
-2. Verify environment variables
-3. Test Supabase connection
-4. Check deployment platform status
+## 📈 Step 8: Monitoring & Maintenance
 
+### 8.1 Application Monitoring
+
+**Railway:**
+- Built-in metrics dashboard
+- Logs available in dashboard
+
+**Render:**
+- Metrics in service dashboard
+- Logs streaming available
+
+**Third-party:**
+- Sentry for error tracking
+- Datadog/New Relic for APM
+
+### 8.2 Database Monitoring
+
+**Supabase:**
+- Dashboard → Database → Metrics
+- Monitor query performance
+- Set up alerts for high usage
+
+### 8.3 Celery Monitoring
+
+**Flower (optional):**
+```bash
+pip install flower
+celery -A backend.core.celery_app flower
+```
+
+Access at: `http://your-domain.com:5555`
+
+---
+
+## 🚨 Step 9: Troubleshooting
+
+### Issue: Tables not created in Supabase
+
+**Solution:**
+1. Check Supabase URL and Key in environment
+2. Run migration manually in SQL Editor
+3. Verify service role key if using auto-creation
+
+### Issue: Celery workers not processing
+
+**Solution:**
+1. Check Redis connection
+2. Verify `REDIS_URL` environment variable
+3. Check worker logs for errors
+
+### Issue: Registration/Login fails
+
+**Solution:**
+1. Verify database tables exist
+2. Check JWT_SECRET_KEY is set
+3. Check database connection
+4. Review application logs
+
+### Issue: Static files not loading
+
+**Solution:**
+1. Verify `static_folder` path in Flask config
+2. Check file permissions
+3. Verify deployment includes `frontend/static/` directory
+
+---
+
+## ✅ Step 10: Post-Deployment Checklist
+
+- [ ] Database tables created and verified
+- [ ] Environment variables configured
+- [ ] Registration endpoint working
+- [ ] Login endpoint working
+- [ ] Celery workers running
+- [ ] Redis connected
+- [ ] HTTPS enabled
+- [ ] Custom domain configured (optional)
+- [ ] Stripe keys configured
+- [ ] API keys configured
+- [ ] Monitoring set up
+- [ ] Backup strategy in place
+
+---
+
+## 📚 Additional Resources
+
+- **Supabase Docs**: https://supabase.com/docs
+- **Railway Docs**: https://docs.railway.app
+- **Render Docs**: https://render.com/docs
+- **Celery Docs**: https://docs.celeryproject.org
+- **Stripe Docs**: https://stripe.com/docs
+
+---
+
+## 🎉 Success!
+
+Your multi-tenant SaaS email platform is now deployed and ready for production use!
+
+**Next Steps:**
+1. Create your first user account
+2. Configure SMTP servers
+3. Import/scrape leads
+4. Create campaigns
+5. Start sending emails!
+
+---
+
+**Need Help?**
+- Check logs in deployment platform dashboard
+- Review error messages in application logs
+- Verify all environment variables are set correctly
+- Ensure database tables are created

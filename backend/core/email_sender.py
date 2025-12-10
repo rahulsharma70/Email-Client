@@ -870,20 +870,36 @@ class EmailSender:
                 return server
             return None
         
-        conn = self.db.connect()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM smtp_servers WHERE id = ? AND is_active = 1", (smtp_id,))
-        row = cursor.fetchone()
-        if row:
-            server = dict(row)
-            # Ensure password is properly decoded
-            if 'password' in server and server['password']:
-                password = server['password']
-                if isinstance(password, bytes):
-                    password = password.decode('utf-8')
-                server['password'] = password
-            return server
-        return None
+        # Check if using Supabase
+        if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
+            # Use Supabase
+            result = self.db.supabase.client.table('smtp_servers').select('*').eq('id', smtp_id).eq('is_active', 1).execute()
+            if result.data and len(result.data) > 0:
+                server = result.data[0]
+                # Ensure password is properly decoded
+                if 'password' in server and server['password']:
+                    password = server['password']
+                    if isinstance(password, bytes):
+                        password = password.decode('utf-8')
+                    server['password'] = password
+                return server
+            return None
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM smtp_servers WHERE id = ? AND is_active = 1", (smtp_id,))
+            row = cursor.fetchone()
+            if row:
+                server = dict(row)
+                # Ensure password is properly decoded
+                if 'password' in server and server['password']:
+                    password = server['password']
+                    if isinstance(password, bytes):
+                        password = password.decode('utf-8')
+                    server['password'] = password
+                return server
+            return None
     
     def save_to_imap_sent(self, msg, smtp_config):
         """Save sent email to IMAP Sent folder"""

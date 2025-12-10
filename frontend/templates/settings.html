@@ -433,9 +433,15 @@
                     <div id="dbConnection" style="font-weight: bold;">-</div>
                 </div>
             </div>
-            <button type="button" class="btn btn-sm btn-info" onclick="checkDatabaseConnection()" style="margin-top: 10px; width: 100%;">
-                <i class="fas fa-sync"></i> Refresh Connection Status
-            </button>
+            <div style="margin-top: 10px; font-size: 11px; color: #7f8c8d;" id="dbError"></div>
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 10px;">
+                <button type="button" class="btn btn-sm btn-info" onclick="checkDatabaseConnection()" style="width: 100%;">
+                    <i class="fas fa-sync"></i> Refresh
+                </button>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="checkRedisStatus()" style="width: 100%;">
+                    <i class="fas fa-database"></i> Check Redis
+                </button>
+            </div>
         </div>
     </div>
     
@@ -482,7 +488,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // Auto-refresh queue stats every 5 seconds
     setInterval(loadQueueStats, 5000);
     setInterval(loadSenderStatus, 3000);
-    setInterval(checkDatabaseConnection, 30000); // Check DB connection every 30s
+    setInterval(checkDatabaseConnection, 10000); // Check DB connection every 10s
+    setInterval(checkRedisStatus, 15000); // Check Redis every 15s
 });
 
 // Load API keys (masked)

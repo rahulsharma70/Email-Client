@@ -65,7 +65,77 @@
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.6.0/axios.min.js"></script>
+    <script>
+    // CRITICAL: Set token in axios IMMEDIATELY after axios loads, before auth.js
+    (function() {
+        const token = localStorage.getItem('jwt_token') || sessionStorage.getItem('jwt_token');
+        if (token && typeof axios !== 'undefined') {
+            axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+            console.log('Token set in axios before auth.js loads');
+        }
+    })();
+    </script>
+    <script src="{{ url_for('static', filename='js/auth.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/session.js') }}"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script>
+    // Global session management - non-blocking, prevents redirect loops
+    (async function() {
+        // Wait for scripts to load
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // Initialize auth - ensure token is set in axios
+        let token = localStorage.getItem('jwt_token') || sessionStorage.getItem('jwt_token');
+        if (token && typeof axios !== 'undefined') {
+            axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+        }
+        
+        // Initialize AuthManager
+        if (typeof AuthManager !== 'undefined') {
+            AuthManager.init();
+        }
+        
+        // List of public pages that don't require auth
+        const publicPages = ['/login', '/register', '/terms', '/privacy', '/gdpr', '/health'];
+        const currentPath = window.location.pathname;
+        const isPublicPage = publicPages.includes(currentPath);
+        
+        // For protected pages, validate token in background (non-blocking)
+        // Only redirect if we're sure the token is invalid
+        if (!isPublicPage) {
+            // Get token from storage directly
+            token = localStorage.getItem('jwt_token') || sessionStorage.getItem('jwt_token');
+            
+            if (token) {
+                // Set header immediately
+                if (typeof axios !== 'undefined') {
+                    axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+                }
+                
+                // Validate token
+                if (typeof AuthManager !== 'undefined') {
+                    AuthManager.validateToken().then(isValid => {
+                        if (!isValid) {
+                            // Token invalid - redirect to login
+                            console.log('Token validation failed, redirecting to login');
+                            if (window.location.pathname !== '/login') {
+                                window.location.href = '/login';
+                            }
+                        }
+                    }).catch(() => {
+                        // Silent fail - let API calls handle auth errors via 401
+                    });
+                }
+            } else {
+                // No token at all - redirect to login
+                console.log('No token found, redirecting to login');
+                if (window.location.pathname !== '/login' && window.location.pathname !== '/register') {
+                    window.location.href = '/login';
+                }
+            }
+        }
+    })();
+    </script>
     {% block extra_js %}{% endblock %}
 </body>
 </html>

@@ -1,46 +1,86 @@
 """
 Email Personalization Module for ANAGHA SOLUTION
-Uses OpenRouter API for LLM-based personalization
+Uses OpenRouter API for LLM-based personalization with cost controls
 """
 
 import requests
 import json
+import hashlib
 from typing import Dict, Optional, List
+from database.db_manager import DatabaseManager
 
 class EmailPersonalizer:
-    def __init__(self, openrouter_api_key: str = None, model: str = None):
+    def __init__(self, openrouter_api_key: str = None, model: str = None, db_manager: DatabaseManager = None, user_id: int = None):
         """
-        Initialize email personalizer
+        Initialize email personalizer with quota management
         
         Args:
             openrouter_api_key: OpenRouter API key (can be set via environment variable OPENROUTER_API_KEY)
             model: Model to use for personalization (default: from config)
+            db_manager: Database manager for quota tracking
+            user_id: User ID for quota enforcement
         """
         from core.config import Config
         self.api_key = openrouter_api_key or self._get_api_key()
         self.model = model or Config.OPENROUTER_MODEL
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
+        self.db = db_manager
+        self.user_id = user_id
+        self._cache = {}  # Simple in-memory cache
         
     def _get_api_key(self) -> Optional[str]:
         """Get API key from environment variable"""
         from core.config import Config
         return Config.get_openrouter_key()
     
-    def personalize_email(self, template: str, name: str, company: str, context: str = "") -> str:
+    def _get_cache_key(self, template: str, name: str, company: str, context: str) -> str:
+        """Generate cache key for personalization"""
+        content = f"{template}|{name}|{company}|{context}"
+        return hashlib.md5(content.encode()).hexdigest()
+    
+    def _check_quota(self) -> Dict:
+        """Check LLM quota before making API call"""
+        if not self.db or not self.user_id:
+            return {'allowed': True}
+        
+        from core.quota_manager import QuotaManager
+        quota_mgr = QuotaManager(self.db)
+        
+        # Estimate tokens (rough: 1 token ≈ 4 characters)
+        estimated_tokens = 500  # Conservative estimate per personalization
+        return quota_mgr.check_llm_quota(self.user_id, estimated_tokens)
+    
+    def personalize_email(self, template: str, name: str, company: str, context: str = "", use_cache: bool = True) -> str:
         """
-        Personalize email template using LLM
+        Personalize email template using LLM with quota and caching
         
         Args:
             template: Base email template (can include {name}, {company} placeholders)
             name: Recipient name
             company: Company name
             context: Additional context about the recipient/company
+            use_cache: Whether to use cached results
             
         Returns:
             Personalized email content
         """
         if not self.api_key:
             # Fallback to simple replacement if no API key
+            personalized = template.replace('{name}', name)
+            personalized = personalized.replace('{company}', company)
+            return personalized
+        
+        # Check cache first
+        if use_cache:
+            cache_key = self._get_cache_key(template, name, company, context)
+            if cache_key in self._cache:
+                return self._cache[cache_key]
+        
+        # Check quota
+        quota_check = self._check_quota()
+        if not quota_check.get('allowed', True):
+            # Quota exceeded - use fallback
+            print(f"LLM quota exceeded for user {self.user_id}, using fallback")
             personalized = template.replace('{name}', name)
             personalized = personalized.replace('{company}', company)
             return personalized
@@ -94,6 +134,27 @@ Return ONLY the personalized email content, no additional text or explanations."
             data = response.json()
             personalized_content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
             
+            # Track token usage
+            usage = data.get('usage', {})
+            prompt_tokens = usage.get('prompt_tokens', 0)
+            completion_tokens = usage.get('completion_tokens', 0)
+            total_tokens = usage.get('total_tokens', prompt_tokens + completion_tokens)
+            
+            # Record usage
+            if self.db and self.user_id:
+                from core.quota_manager import QuotaManager
+                from core.observability import ObservabilityManager
+                
+                quota_mgr = QuotaManager(self.db)
+                quota_mgr.record_llm_usage(self.user_id, total_tokens)
+                
+                # Record metric for observability
+                obs_mgr = ObservabilityManager(self.db)
+                obs_mgr.record_metric(self.user_id, 'llm', 'tokens_used', float(total_tokens), {
+                    'prompt_tokens': prompt_tokens,
+                    'completion_tokens': completion_tokens
+                })
+            
             # Clean up the response (remove markdown code blocks if present)
             personalized_content = personalized_content.strip()
             if personalized_content.startswith('```'):
@@ -105,7 +166,14 @@ Return ONLY the personalized email content, no additional text or explanations."
                     lines = lines[:-1]
                 personalized_content = '\n'.join(lines)
             
-            return personalized_content.strip()
+            result = personalized_content.strip()
+            
+            # Cache result
+            if use_cache:
+                cache_key = self._get_cache_key(template, name, company, context)
+                self._cache[cache_key] = result
+            
+            return result
             
         except requests.RequestException as e:
             print(f"Error calling OpenRouter API: {e}")

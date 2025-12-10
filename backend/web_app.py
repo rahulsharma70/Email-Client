@@ -7,6 +7,12 @@ from flask import Flask, render_template, request, jsonify, redirect, url_for, f
 from flask_cors import CORS
 import os
 import sys
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Load environment variables from .env file
+env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # Add backend directory to path
 backend_dir = os.path.dirname(os.path.abspath(__file__))
@@ -15,10 +21,13 @@ sys.path.insert(0, backend_dir)
 from database.db_manager import DatabaseManager
 from core.email_sender import EmailSender
 from core.auth import AuthManager
-from core.middleware import require_auth, optional_auth, get_current_user
+from core.middleware import require_auth, optional_auth, get_current_user, set_auth_manager
 from core.rate_limiter import RateLimiter
 from core.warmup import WarmupManager
 from core.billing import BillingManager
+from core.warmup_manager import WarmupManager
+from core.observability import ObservabilityManager
+from database.migrations import MigrationManager
 import pandas as pd
 from datetime import datetime
 import json
@@ -58,27 +67,49 @@ if database_type == 'supabase':
         supabase_url = os.getenv('SUPABASE_URL')
         supabase_key = os.getenv('SUPABASE_KEY')
         if supabase_url and supabase_key:
+            print("Initializing Supabase database...")
             db = SupabaseDatabaseManager(supabase_url, supabase_key)
             print("✓ Using Supabase database")
+            # Ensure tables are created
+            db.initialize_database()
         else:
             print("⚠️  Supabase URL/Key not found, falling back to SQLite")
             db = DatabaseManager()
             db.initialize_database()
     except Exception as e:
-        print(f"⚠️  Error initializing Supabase: {e}, falling back to SQLite")
+        import traceback
+        print(f"⚠️  Error initializing Supabase: {e}")
+        traceback.print_exc()
+        print("Falling back to SQLite...")
         db = DatabaseManager()
         db.initialize_database()
 else:
+    print("Initializing SQLite database...")
     db = DatabaseManager()
     db.initialize_database()
+    print("✓ SQLite database initialized")
 
 # Initialize managers
 from database.settings_manager import SettingsManager
+from database.migrations import MigrationManager
+from core.warmup_manager import WarmupManager as EnhancedWarmupManager
+from core.observability import ObservabilityManager
+
 settings_manager = SettingsManager(db)
 auth_manager = AuthManager(db)
+# Set auth manager in middleware so it uses the same instance
+set_auth_manager(auth_manager)
 rate_limiter = RateLimiter(db)
-warmup_manager = WarmupManager(db)
+warmup_manager = WarmupManager(db)  # Keep old one for compatibility
+enhanced_warmup_manager = EnhancedWarmupManager(db)
 billing_manager = BillingManager(db)
+observability_manager = ObservabilityManager(db)
+
+# Run migrations and create indexes
+migration_manager = MigrationManager(db)
+migration_manager.migrate_schema()
+migration_manager.create_indexes()
+print("✓ Database migrations and indexes created")
 
 # Global email sender instance
 email_sender = None
@@ -123,26 +154,40 @@ def api_login():
         result = auth_manager.login_user(email, password)
         
         if result.get('success'):
-            return jsonify(result)
+            return jsonify({
+                'success': True,
+                'token': result['token'],
+                'user': {
+                    'id': result['user_id'],
+                    'email': result['email'],
+                    'first_name': result.get('first_name', ''),
+                    'last_name': result.get('last_name', '')
+                }
+            })
         else:
-            return jsonify(result), 401
+            return jsonify({'error': result.get('error', 'Login failed')}), 401
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/auth/me', methods=['GET'])
-@require_auth
+@optional_auth
 def api_get_current_user(user_id):
-    """Get current user info"""
+    """Get current user info - validates token"""
     try:
+        if not user_id:
+            return jsonify({'success': False, 'error': 'Not authenticated'}), 401
+        
         user = auth_manager.get_user(user_id)
         if user:
             # Don't return sensitive info
             user.pop('password_hash', None)
             return jsonify({'success': True, 'user': user})
         else:
-            return jsonify({'error': 'User not found'}), 404
+            return jsonify({'success': False, 'error': 'User not found'}), 404
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        import traceback
+        print(f"Error in /api/auth/me: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/auth/change-password', methods=['POST'])
 @require_auth
@@ -220,6 +265,31 @@ def inbox():
     """Inbox page for viewing incoming emails"""
     return render_template('inbox.html')
 
+@app.route('/login')
+def login_page():
+    """Login page"""
+    return render_template('login.html')
+
+@app.route('/register')
+def register_page():
+    """Register page"""
+    return render_template('register.html')
+
+@app.route('/terms')
+def terms_page():
+    """Terms of Service page"""
+    return render_template('terms.html')
+
+@app.route('/privacy')
+def privacy_page():
+    """Privacy Policy page"""
+    return render_template('privacy.html')
+
+@app.route('/gdpr')
+def gdpr_page():
+    """GDPR Compliance page"""
+    return render_template('gdpr.html')
+
 # Inbox API Routes
 import imaplib
 import email
@@ -233,15 +303,23 @@ def api_fetch_inbox(account_id):
         limit = request.args.get('limit', 100, type=int)  # Increased limit to fetch more emails
         
         # Get SMTP/IMAP config for this account
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM smtp_servers WHERE id = ?", (account_id,))
-        row = cursor.fetchone()
-        
-        if not row:
-            return jsonify({'error': 'Account not found'}), 404
-        
-        account = dict(row)
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            result = db.supabase.client.table('smtp_servers').select('*').eq('id', account_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Account not found'}), 404
+            account = result.data[0]
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM smtp_servers WHERE id = ?", (account_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return jsonify({'error': 'Account not found'}), 404
+            
+            account = dict(row)
         
         # Get IMAP settings - try imap_host first, then construct from smtp host
         imap_host = account.get('imap_host')
@@ -573,15 +651,23 @@ def api_fetch_email_body(account_id, email_uid):
         folder = request.args.get('folder', 'INBOX')
         
         # Get account config
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM smtp_servers WHERE id = ?", (account_id,))
-        row = cursor.fetchone()
-        
-        if not row:
-            return jsonify({'error': 'Account not found'}), 404
-        
-        account = dict(row)
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            result = db.supabase.client.table('smtp_servers').select('*').eq('id', account_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Account not found'}), 404
+            account = result.data[0]
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM smtp_servers WHERE id = ?", (account_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return jsonify({'error': 'Account not found'}), 404
+            
+            account = dict(row)
         
         imap_host = account.get('imap_host')
         if not imap_host:
@@ -706,15 +792,23 @@ def api_delete_emails():
             return jsonify({'error': 'No email UIDs provided'}), 400
         
         # Get account config
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM smtp_servers WHERE id = ?", (account_id,))
-        row = cursor.fetchone()
-        
-        if not row:
-            return jsonify({'error': 'Account not found'}), 404
-        
-        account = dict(row)
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            result = db.supabase.client.table('smtp_servers').select('*').eq('id', account_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Account not found'}), 404
+            account = result.data[0]
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM smtp_servers WHERE id = ?", (account_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return jsonify({'error': 'Account not found'}), 404
+            
+            account = dict(row)
         
         # Get IMAP settings
         imap_host = account.get('imap_host')
@@ -795,72 +889,154 @@ def api_delete_emails():
 def api_get_sent_emails():
     """Get sent emails"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
-        
-        # Get query parameters
-        limit = request.args.get('limit', 100, type=int)
-        offset = request.args.get('offset', 0, type=int)
-        search = request.args.get('search', '')
-        
-        query = """
-            SELECT se.*, c.name as campaign_name, r.first_name, r.last_name
-            FROM sent_emails se
-            LEFT JOIN campaigns c ON se.campaign_id = c.id
-            LEFT JOIN recipients r ON se.recipient_id = r.id
-            WHERE 1=1
-        """
-        params = []
-        
-        if search:
-            query += " AND (se.recipient_email LIKE ? OR se.subject LIKE ? OR se.sender_email LIKE ?)"
-            search_term = f"%{search}%"
-            params.extend([search_term, search_term, search_term])
-        
-        query += " ORDER BY se.sent_at DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        
-        cursor.execute(query, params)
-        sent_emails = [dict(row) for row in cursor.fetchall()]
-        
-        # Get total count
-        count_query = "SELECT COUNT(*) FROM sent_emails se WHERE 1=1"
-        count_params = []
-        if search:
-            count_query += " AND (se.recipient_email LIKE ? OR se.subject LIKE ? OR se.sender_email LIKE ?)"
-            search_term = f"%{search}%"
-            count_params.extend([search_term, search_term, search_term])
-        cursor.execute(count_query, count_params)
-        total = cursor.fetchone()[0]
-        
-        return jsonify({
-            'success': True,
-            'sent_emails': sent_emails,
-            'total': total
-        })
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            # Use Supabase methods
+            limit = request.args.get('limit', 100, type=int)
+            offset = request.args.get('offset', 0, type=int)
+            search = request.args.get('search', '')
+            
+            # Get sent emails with joins (Supabase doesn't support complex JOINs easily)
+            # For now, get sent_emails and enrich with campaign/recipient data separately
+            query = db.supabase.client.table('sent_emails').select('*')
+            
+            if search:
+                # Supabase text search - filter in Python for now (or use multiple queries)
+                # For better performance, could use Supabase RPC function
+                pass  # Will filter after fetching
+            
+            query = query.order('sent_at', desc=True).range(offset, offset + limit - 1)
+            result = query.execute()
+            sent_emails = result.data if result.data else []
+            
+            # Filter by search term if provided
+            if search:
+                search_lower = search.lower()
+                sent_emails = [e for e in sent_emails if 
+                              search_lower in (e.get('recipient_email', '') or '').lower() or
+                              search_lower in (e.get('subject', '') or '').lower() or
+                              search_lower in (e.get('sender_email', '') or '').lower()]
+            
+            # Enrich with campaign and recipient data
+            for email in sent_emails:
+                if email.get('campaign_id'):
+                    campaign = db.supabase.client.table('campaigns').select('name').eq('id', email['campaign_id']).execute()
+                    email['campaign_name'] = campaign.data[0]['name'] if campaign.data else None
+                if email.get('recipient_id'):
+                    recipient = db.supabase.client.table('recipients').select('first_name,last_name').eq('id', email['recipient_id']).execute()
+                    if recipient.data:
+                        email['first_name'] = recipient.data[0].get('first_name')
+                        email['last_name'] = recipient.data[0].get('last_name')
+            
+            # Get total count
+            if search:
+                # For search, count filtered results
+                total = len(sent_emails)
+            else:
+                count_query = db.supabase.client.table('sent_emails').select('id', count='exact')
+                count_result = count_query.execute()
+                total = count_result.count if hasattr(count_result, 'count') else len(sent_emails)
+            
+            return jsonify({
+                'success': True,
+                'sent_emails': sent_emails,
+                'total': total
+            })
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            # Get query parameters
+            limit = request.args.get('limit', 100, type=int)
+            offset = request.args.get('offset', 0, type=int)
+            search = request.args.get('search', '')
+            
+            query = """
+                SELECT se.*, c.name as campaign_name, r.first_name, r.last_name
+                FROM sent_emails se
+                LEFT JOIN campaigns c ON se.campaign_id = c.id
+                LEFT JOIN recipients r ON se.recipient_id = r.id
+                WHERE 1=1
+            """
+            params = []
+            
+            if search:
+                query += " AND (se.recipient_email LIKE ? OR se.subject LIKE ? OR se.sender_email LIKE ?)"
+                search_term = f"%{search}%"
+                params.extend([search_term, search_term, search_term])
+            
+            query += " ORDER BY se.sent_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+            
+            cursor.execute(query, params)
+            sent_emails = [dict(row) for row in cursor.fetchall()]
+            
+            # Get total count
+            count_query = "SELECT COUNT(*) FROM sent_emails se WHERE 1=1"
+            count_params = []
+            if search:
+                count_query += " AND (se.recipient_email LIKE ? OR se.subject LIKE ? OR se.sender_email LIKE ?)"
+                search_term = f"%{search}%"
+                count_params.extend([search_term, search_term, search_term])
+            cursor.execute(count_query, count_params)
+            total = cursor.fetchone()[0]
+            
+            return jsonify({
+                'success': True,
+                'sent_emails': sent_emails,
+                'total': total
+            })
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/sent-emails/<int:email_id>')
 def api_get_sent_email(email_id):
     """Get a single sent email"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT se.*, c.name as campaign_name, r.first_name, r.last_name
-            FROM sent_emails se
-            LEFT JOIN campaigns c ON se.campaign_id = c.id
-            LEFT JOIN recipients r ON se.recipient_id = r.id
-            WHERE se.id = ?
-        """, (email_id,))
-        row = cursor.fetchone()
-        
-        if row:
-            return jsonify({'success': True, 'email': dict(row)})
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            # Use Supabase methods
+            result = db.supabase.client.table('sent_emails').select('*').eq('id', email_id).execute()
+            
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Email not found'}), 404
+            
+            email = result.data[0]
+            
+            # Enrich with campaign and recipient data
+            if email.get('campaign_id'):
+                campaign = db.supabase.client.table('campaigns').select('name').eq('id', email['campaign_id']).execute()
+                email['campaign_name'] = campaign.data[0]['name'] if campaign.data else None
+            if email.get('recipient_id'):
+                recipient = db.supabase.client.table('recipients').select('first_name,last_name').eq('id', email['recipient_id']).execute()
+                if recipient.data:
+                    email['first_name'] = recipient.data[0].get('first_name')
+                    email['last_name'] = recipient.data[0].get('last_name')
+            
+            return jsonify({'success': True, 'email': email})
         else:
-            return jsonify({'error': 'Email not found'}), 404
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT se.*, c.name as campaign_name, r.first_name, r.last_name
+                FROM sent_emails se
+                LEFT JOIN campaigns c ON se.campaign_id = c.id
+                LEFT JOIN recipients r ON se.recipient_id = r.id
+                WHERE se.id = ?
+            """, (email_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                return jsonify({'success': True, 'email': dict(row)})
+            else:
+                return jsonify({'error': 'Email not found'}), 404
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/sent-items')
@@ -1018,6 +1194,8 @@ def api_set_api_keys(user_id):
         return jsonify({'success': True, 'message': 'API keys saved successfully'})
     except Exception as e:
         import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # Database Configuration API
 @app.route('/api/settings/database', methods=['GET'])
@@ -1069,7 +1247,7 @@ def api_set_database_config(user_id):
 
 @app.route('/api/settings/test-supabase', methods=['POST'])
 def api_test_supabase():
-    """Test Supabase connection"""
+    """Test Supabase connection - DYNAMIC"""
     try:
         data = request.json if request.is_json else request.form.to_dict()
         url = data.get('url')
@@ -1078,44 +1256,80 @@ def api_test_supabase():
         if not url or not key:
             return jsonify({'error': 'URL and Key are required'}), 400
         
-        from core.supabase_client import SupabaseClient
-        client = SupabaseClient(url, key)
-        connected = client.test_connection()
-        
-        if connected:
-            return jsonify({'success': True, 'message': 'Connection successful'})
-        else:
-            return jsonify({'success': False, 'error': 'Connection failed'})
+        try:
+            from core.supabase_client import SupabaseClient
+            client = SupabaseClient(url, key)
+            connected = client.test_connection()
+            
+            if connected:
+                # Test a simple query
+                try:
+                    result = client.client.table('users').select('id').limit(1).execute()
+                    return jsonify({
+                        'success': True, 
+                        'message': 'Supabase connection successful',
+                        'details': {
+                            'url': url.split('//')[1].split('.')[0] if '//' in url else url,
+                            'query_test': 'passed',
+                            'timestamp': datetime.now().isoformat()
+                        }
+                    })
+                except:
+                    return jsonify({
+                        'success': True,
+                        'message': 'Supabase connection successful (tables may need migration)',
+                        'details': {
+                            'url': url.split('//')[1].split('.')[0] if '//' in url else url,
+                            'timestamp': datetime.now().isoformat()
+                        }
+                    })
+            else:
+                return jsonify({'success': False, 'error': 'Connection test failed'})
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'Connection error: {str(e)}'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/settings/database-status', methods=['GET'])
 def api_get_database_status():
-    """Get database connection status"""
+    """Get database connection status - DYNAMIC"""
     try:
-        database_type = os.getenv('DATABASE_TYPE', 'sqlite')
+        # Get from settings (persistent) or env
+        database_type = settings_manager.get_setting('DATABASE_TYPE') or os.getenv('DATABASE_TYPE', 'sqlite')
         connected = False
+        error_message = None
         
         if database_type == 'supabase':
             try:
-                from core.supabase_client import SupabaseClient
-                client = SupabaseClient()
-                connected = client.test_connection()
-            except:
+                supabase_url = settings_manager.get_setting('SUPABASE_URL') or os.getenv('SUPABASE_URL')
+                supabase_key = settings_manager.get_setting('SUPABASE_KEY') or os.getenv('SUPABASE_KEY')
+                
+                if supabase_url and supabase_key:
+                    from core.supabase_client import SupabaseClient
+                    client = SupabaseClient(supabase_url, supabase_key)
+                    connected = client.test_connection()
+                else:
+                    error_message = 'Supabase URL or Key not configured'
+            except Exception as e:
                 connected = False
+                error_message = str(e)
         else:
             # SQLite - always connected if file exists
             try:
-                db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'anagha_solution.db')
+                backend_dir = os.path.dirname(os.path.abspath(__file__))
+                db_path = os.path.join(backend_dir, 'anagha_solution.db')
                 connected = os.path.exists(db_path)
-            except:
+            except Exception as e:
                 connected = False
+                error_message = str(e)
         
         return jsonify({
             'success': True,
             'status': {
                 'connected': connected,
-                'database_type': database_type
+                'database_type': database_type,
+                'error': error_message,
+                'timestamp': datetime.now().isoformat()
             }
         })
     except Exception as e:
@@ -1258,8 +1472,9 @@ def api_resume_sender():
 # API Routes
 
 @app.route('/api/dashboard/stats')
-def api_dashboard_stats():
-    """Get dashboard statistics"""
+@optional_auth
+def api_dashboard_stats(user_id):
+    """Get dashboard statistics with observability metrics"""
     try:
         queue_stats = db.get_queue_stats()
         daily_stats = db.get_daily_stats()
@@ -1275,6 +1490,12 @@ def api_dashboard_stats():
         
         recipients = db.get_recipients()
         subscriber_count = len(recipients)
+        
+        # Get observability metrics
+        try:
+            obs_metrics = observability_manager.get_dashboard_metrics(user_id)
+        except:
+            obs_metrics = {}
         
         return jsonify({
             'sent_today': queue_stats.get('sent_today', 0),
@@ -1848,15 +2069,23 @@ def api_fetch_pop3(account_id):
         limit = request.args.get('limit', 100, type=int)  # Increased limit to fetch more emails
         
         # Get account config
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM smtp_servers WHERE id = ?", (account_id,))
-        row = cursor.fetchone()
-        
-        if not row:
-            return jsonify({'error': 'Account not found'}), 404
-        
-        account = dict(row)
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            result = db.supabase.client.table('smtp_servers').select('*').eq('id', account_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Account not found'}), 404
+            account = result.data[0]
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM smtp_servers WHERE id = ?", (account_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return jsonify({'error': 'Account not found'}), 404
+            
+            account = dict(row)
         
         pop3_host = account.get('pop3_host')
         if not pop3_host:
@@ -2104,104 +2333,180 @@ def api_update_smtp(server_id):
     try:
         data = request.json if request.is_json else request.form.to_dict()
         
-        conn = db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
         
-        # Check if server exists
-        cursor.execute("SELECT id FROM smtp_servers WHERE id = ?", (server_id,))
-        if not cursor.fetchone():
-            return jsonify({'error': 'Server not found'}), 404
-        
-        # Build update query dynamically based on provided fields
-        updates = []
-        params = []
-        
-        if 'name' in data:
-            updates.append("name = ?")
-            params.append(data['name'])
-        if 'host' in data:
-            updates.append("host = ?")
-            params.append(data['host'])
-        if 'port' in data:
-            updates.append("port = ?")
-            params.append(int(data['port']))
-        if 'username' in data:
-            updates.append("username = ?")
-            params.append(data['username'])
-        if 'password' in data and data['password']:
-            import urllib.parse
-            password = data['password']
-            try:
-                password = urllib.parse.unquote(password)
-            except:
-                pass
-            updates.append("password = ?")
-            params.append(password)
-        if 'use_ssl' in data:
-            use_ssl = data['use_ssl']
-            if isinstance(use_ssl, str):
-                use_ssl = use_ssl.lower() in ('true', 'on', '1')
-            updates.append("use_ssl = ?")
-            params.append(1 if use_ssl else 0)
-        if 'use_tls' in data:
-            use_tls = data['use_tls']
-            if isinstance(use_tls, str):
-                use_tls = use_tls.lower() in ('true', 'on', '1')
-            updates.append("use_tls = ?")
-            params.append(1 if use_tls else 0)
-        if 'imap_host' in data:
-            updates.append("imap_host = ?")
-            params.append(data['imap_host'])
-        if 'imap_port' in data:
-            updates.append("imap_port = ?")
-            params.append(int(data['imap_port']) if data['imap_port'] else 993)
-        if 'save_to_sent' in data:
-            save_to_sent = data['save_to_sent']
-            if isinstance(save_to_sent, str):
-                save_to_sent = save_to_sent.lower() in ('true', 'on', '1')
-            updates.append("save_to_sent = ?")
-            params.append(1 if save_to_sent else 0)
-        if 'max_per_hour' in data:
-            updates.append("max_per_hour = ?")
-            params.append(int(data['max_per_hour']))
-        
-        # POP3 settings
-        if 'pop3_host' in data:
-            updates.append("pop3_host = ?")
-            params.append(data['pop3_host'])
-        if 'pop3_port' in data:
-            updates.append("pop3_port = ?")
-            params.append(int(data['pop3_port']) if data['pop3_port'] else 995)
-        if 'pop3_ssl' in data:
-            pop3_ssl = data['pop3_ssl']
-            if isinstance(pop3_ssl, str):
-                pop3_ssl = pop3_ssl.lower() in ('true', 'on', '1')
-            updates.append("pop3_ssl = ?")
-            params.append(1 if pop3_ssl else 0)
-        if 'pop3_leave_on_server' in data:
-            pop3_leave = data['pop3_leave_on_server']
-            if isinstance(pop3_leave, str):
-                pop3_leave = pop3_leave.lower() in ('true', 'on', '1')
-            updates.append("pop3_leave_on_server = ?")
-            params.append(1 if pop3_leave else 0)
-        if 'incoming_protocol' in data:
-            updates.append("incoming_protocol = ?")
-            params.append(data['incoming_protocol'])
-        
-        if not updates:
-            return jsonify({'error': 'No fields to update'}), 400
-        
-        # Add server_id to params
-        params.append(server_id)
-        
-        # Execute update
-        query = f"UPDATE smtp_servers SET {', '.join(updates)} WHERE id = ?"
-        cursor.execute(query, params)
-        conn.commit()
-        
-        return jsonify({'success': True, 'message': 'Email account updated successfully'})
+        if use_supabase:
+            # Check if server exists
+            result = db.supabase.client.table('smtp_servers').select('id').eq('id', server_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Server not found'}), 404
+            
+            # Build update data
+            update_data = {}
+            
+            if 'name' in data:
+                update_data['name'] = data['name']
+            if 'host' in data:
+                update_data['host'] = data['host']
+            if 'port' in data:
+                update_data['port'] = int(data['port'])
+            if 'username' in data:
+                update_data['username'] = data['username']
+            if 'password' in data and data['password']:
+                import urllib.parse
+                password = data['password']
+                try:
+                    password = urllib.parse.unquote(password)
+                except:
+                    pass
+                update_data['password'] = password
+            if 'use_ssl' in data:
+                use_ssl = data['use_ssl']
+                if isinstance(use_ssl, str):
+                    use_ssl = use_ssl.lower() in ('true', 'on', '1')
+                update_data['use_ssl'] = 1 if use_ssl else 0
+            if 'use_tls' in data:
+                use_tls = data['use_tls']
+                if isinstance(use_tls, str):
+                    use_tls = use_tls.lower() in ('true', 'on', '1')
+                update_data['use_tls'] = 1 if use_tls else 0
+            if 'imap_host' in data:
+                update_data['imap_host'] = data['imap_host']
+            if 'imap_port' in data:
+                update_data['imap_port'] = int(data['imap_port']) if data['imap_port'] else 993
+            if 'save_to_sent' in data:
+                save_to_sent = data['save_to_sent']
+                if isinstance(save_to_sent, str):
+                    save_to_sent = save_to_sent.lower() in ('true', 'on', '1')
+                update_data['save_to_sent'] = 1 if save_to_sent else 0
+            if 'max_per_hour' in data:
+                update_data['max_per_hour'] = int(data['max_per_hour'])
+            if 'pop3_host' in data:
+                update_data['pop3_host'] = data['pop3_host']
+            if 'pop3_port' in data:
+                update_data['pop3_port'] = int(data['pop3_port']) if data['pop3_port'] else 995
+            if 'pop3_ssl' in data:
+                pop3_ssl = data['pop3_ssl']
+                if isinstance(pop3_ssl, str):
+                    pop3_ssl = pop3_ssl.lower() in ('true', 'on', '1')
+                update_data['pop3_ssl'] = 1 if pop3_ssl else 0
+            if 'pop3_leave_on_server' in data:
+                pop3_leave = data['pop3_leave_on_server']
+                if isinstance(pop3_leave, str):
+                    pop3_leave = pop3_leave.lower() in ('true', 'on', '1')
+                update_data['pop3_leave_on_server'] = 1 if pop3_leave else 0
+            if 'incoming_protocol' in data:
+                update_data['incoming_protocol'] = data['incoming_protocol']
+            
+            if not update_data:
+                return jsonify({'error': 'No fields to update'}), 400
+            
+            # Execute update
+            db.supabase.client.table('smtp_servers').update(update_data).eq('id', server_id).execute()
+            
+            return jsonify({'success': True, 'message': 'Email account updated successfully'})
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            # Check if server exists
+            cursor.execute("SELECT id FROM smtp_servers WHERE id = ?", (server_id,))
+            if not cursor.fetchone():
+                return jsonify({'error': 'Server not found'}), 404
+            
+            # Build update query dynamically based on provided fields
+            updates = []
+            params = []
+            
+            if 'name' in data:
+                updates.append("name = ?")
+                params.append(data['name'])
+            if 'host' in data:
+                updates.append("host = ?")
+                params.append(data['host'])
+            if 'port' in data:
+                updates.append("port = ?")
+                params.append(int(data['port']))
+            if 'username' in data:
+                updates.append("username = ?")
+                params.append(data['username'])
+            if 'password' in data and data['password']:
+                import urllib.parse
+                password = data['password']
+                try:
+                    password = urllib.parse.unquote(password)
+                except:
+                    pass
+                updates.append("password = ?")
+                params.append(password)
+            if 'use_ssl' in data:
+                use_ssl = data['use_ssl']
+                if isinstance(use_ssl, str):
+                    use_ssl = use_ssl.lower() in ('true', 'on', '1')
+                updates.append("use_ssl = ?")
+                params.append(1 if use_ssl else 0)
+            if 'use_tls' in data:
+                use_tls = data['use_tls']
+                if isinstance(use_tls, str):
+                    use_tls = use_tls.lower() in ('true', 'on', '1')
+                updates.append("use_tls = ?")
+                params.append(1 if use_tls else 0)
+            if 'imap_host' in data:
+                updates.append("imap_host = ?")
+                params.append(data['imap_host'])
+            if 'imap_port' in data:
+                updates.append("imap_port = ?")
+                params.append(int(data['imap_port']) if data['imap_port'] else 993)
+            if 'save_to_sent' in data:
+                save_to_sent = data['save_to_sent']
+                if isinstance(save_to_sent, str):
+                    save_to_sent = save_to_sent.lower() in ('true', 'on', '1')
+                updates.append("save_to_sent = ?")
+                params.append(1 if save_to_sent else 0)
+            if 'max_per_hour' in data:
+                updates.append("max_per_hour = ?")
+                params.append(int(data['max_per_hour']))
+            
+            # POP3 settings
+            if 'pop3_host' in data:
+                updates.append("pop3_host = ?")
+                params.append(data['pop3_host'])
+            if 'pop3_port' in data:
+                updates.append("pop3_port = ?")
+                params.append(int(data['pop3_port']) if data['pop3_port'] else 995)
+            if 'pop3_ssl' in data:
+                pop3_ssl = data['pop3_ssl']
+                if isinstance(pop3_ssl, str):
+                    pop3_ssl = pop3_ssl.lower() in ('true', 'on', '1')
+                updates.append("pop3_ssl = ?")
+                params.append(1 if pop3_ssl else 0)
+            if 'pop3_leave_on_server' in data:
+                pop3_leave = data['pop3_leave_on_server']
+                if isinstance(pop3_leave, str):
+                    pop3_leave = pop3_leave.lower() in ('true', 'on', '1')
+                updates.append("pop3_leave_on_server = ?")
+                params.append(1 if pop3_leave else 0)
+            if 'incoming_protocol' in data:
+                updates.append("incoming_protocol = ?")
+                params.append(data['incoming_protocol'])
+            
+            if not updates:
+                return jsonify({'error': 'No fields to update'}), 400
+            
+            # Add server_id to params
+            params.append(server_id)
+            
+            # Execute update
+            query = f"UPDATE smtp_servers SET {', '.join(updates)} WHERE id = ?"
+            cursor.execute(query, params)
+            conn.commit()
+            
+            return jsonify({'success': True, 'message': 'Email account updated successfully'})
     except Exception as e:
         import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
 
 @app.route('/api/smtp/list', methods=['GET'])
@@ -2211,78 +2516,140 @@ def api_list_smtp(user_id):
     try:
         servers = db.get_smtp_servers(active_only=False, user_id=user_id)
         # Get default server ID
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM smtp_servers WHERE is_default = 1 LIMIT 1")
-        default_row = cursor.fetchone()
-        default_server_id = default_row[0] if default_row else None
+        default_server_id = None
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            # Use Supabase
+            default_result = db.supabase.client.table('smtp_servers').select('id').eq('is_default', 1).limit(1).execute()
+            if default_result.data and len(default_result.data) > 0:
+                default_server_id = default_result.data[0]['id']
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM smtp_servers WHERE is_default = 1 LIMIT 1")
+            default_row = cursor.fetchone()
+            default_server_id = default_row[0] if default_row else None
         
         # If no default, set first active server as default
         if not default_server_id and servers:
             for server in servers:
                 if server.get('is_active'):
                     default_server_id = server['id']
-                    cursor.execute("UPDATE smtp_servers SET is_default = 1 WHERE id = ?", (default_server_id,))
-                    conn.commit()
+                    if hasattr(db, 'use_supabase') and db.use_supabase:
+                        # Use Supabase
+                        db.supabase.client.table('smtp_servers').update({'is_default': 1}).eq('id', default_server_id).execute()
+                    else:
+                        # SQLite
+                        conn = db.connect()
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE smtp_servers SET is_default = 1 WHERE id = ?", (default_server_id,))
+                        conn.commit()
                     break
         
         return jsonify({'success': True, 'servers': servers, 'default_server_id': default_server_id})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/smtp/set-default/<int:server_id>', methods=['POST'])
 def api_set_default_smtp(server_id):
     """Set default SMTP server for sending"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
-        
-        # Unset all defaults
-        cursor.execute("UPDATE smtp_servers SET is_default = 0")
-        
-        # Set new default
-        cursor.execute("UPDATE smtp_servers SET is_default = 1 WHERE id = ?", (server_id,))
-        conn.commit()
-        
-        if cursor.rowcount > 0:
-            return jsonify({'success': True, 'message': 'Default SMTP server updated'})
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            # Use Supabase
+            # First, get all servers with is_default = 1 and unset them
+            default_servers = db.supabase.client.table('smtp_servers').select('id').eq('is_default', 1).execute()
+            if default_servers.data:
+                for server in default_servers.data:
+                    db.supabase.client.table('smtp_servers').update({'is_default': 0}).eq('id', server['id']).execute()
+            
+            # Set new default
+            result = db.supabase.client.table('smtp_servers').update({'is_default': 1}).eq('id', server_id).execute()
+            
+            if result.data and len(result.data) > 0:
+                return jsonify({'success': True, 'message': 'Default SMTP server updated'})
+            else:
+                return jsonify({'error': 'Server not found'}), 404
         else:
-            return jsonify({'error': 'Server not found'}), 404
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            # Unset all defaults
+            cursor.execute("UPDATE smtp_servers SET is_default = 0")
+            
+            # Set new default
+            cursor.execute("UPDATE smtp_servers SET is_default = 1 WHERE id = ?", (server_id,))
+            conn.commit()
+            
+            if cursor.rowcount > 0:
+                return jsonify({'success': True, 'message': 'Default SMTP server updated'})
+            else:
+                return jsonify({'error': 'Server not found'}), 404
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/smtp/get/<int:server_id>', methods=['GET'])
 def api_get_smtp(server_id):
     """Get SMTP server configuration"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM smtp_servers WHERE id = ?", (server_id,))
-        row = cursor.fetchone()
-        
-        if row:
-            server = dict(row)
-            # Don't expose password in response for security (but we'll use it for testing)
-            return jsonify({'success': True, 'server': server})
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            # Use Supabase
+            result = db.supabase.client.table('smtp_servers').select('*').eq('id', server_id).execute()
+            if result.data and len(result.data) > 0:
+                server = result.data[0]
+                return jsonify({'success': True, 'server': server})
+            else:
+                return jsonify({'error': 'Server not found'}), 404
         else:
-            return jsonify({'error': 'Server not found'}), 404
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM smtp_servers WHERE id = ?", (server_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                server = dict(row)
+                return jsonify({'success': True, 'server': server})
+            else:
+                return jsonify({'error': 'Server not found'}), 404
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/smtp/delete/<int:server_id>', methods=['DELETE'])
 def api_delete_smtp(server_id):
     """Delete SMTP server"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM smtp_servers WHERE id = ?", (server_id,))
-        conn.commit()
-        
-        if cursor.rowcount > 0:
-            return jsonify({'success': True, 'message': 'SMTP server deleted'})
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            # Use Supabase
+            result = db.supabase.client.table('smtp_servers').delete().eq('id', server_id).execute()
+            
+            if result.data and len(result.data) > 0:
+                return jsonify({'success': True, 'message': 'SMTP server deleted'})
+            else:
+                return jsonify({'error': 'Server not found'}), 404
         else:
-            return jsonify({'error': 'Server not found'}), 404
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM smtp_servers WHERE id = ?", (server_id,))
+            conn.commit()
+            
+            if cursor.rowcount > 0:
+                return jsonify({'success': True, 'message': 'SMTP server deleted'})
+            else:
+                return jsonify({'error': 'Server not found'}), 404
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/smtp/toggle/<int:server_id>', methods=['POST'])
@@ -2294,16 +2661,29 @@ def api_toggle_smtp(server_id):
         if isinstance(is_active, str):
             is_active = 1 if is_active.lower() in ('true', 'on', '1') else 0
         
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE smtp_servers SET is_active = ? WHERE id = ?", (is_active, server_id))
-        conn.commit()
-        
-        if cursor.rowcount > 0:
-            return jsonify({'success': True, 'message': 'Server status updated'})
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            # Use Supabase
+            result = db.supabase.client.table('smtp_servers').update({'is_active': is_active}).eq('id', server_id).execute()
+            
+            if result.data and len(result.data) > 0:
+                return jsonify({'success': True, 'message': 'Server status updated'})
+            else:
+                return jsonify({'error': 'Server not found'}), 404
         else:
-            return jsonify({'error': 'Server not found'}), 404
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE smtp_servers SET is_active = ? WHERE id = ?", (is_active, server_id))
+            conn.commit()
+            
+            if cursor.rowcount > 0:
+                return jsonify({'success': True, 'message': 'Server status updated'})
+            else:
+                return jsonify({'error': 'Server not found'}), 404
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/templates/save', methods=['POST'])
@@ -2667,14 +3047,19 @@ def api_scrape_leads(user_id):
         scraper = LeadScraper(db)
         
         # Create job record first to get job_id
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO lead_scraping_jobs (icp_description, status, user_id)
-            VALUES (?, 'running', ?)
-        """, (icp_description, user_id))
-        job_id = cursor.lastrowid
-        conn.commit()
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            job_id = db.create_scraping_job(icp_description, user_id)
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO lead_scraping_jobs (icp_description, status, user_id)
+                VALUES (?, 'running', ?)
+            """, (icp_description, user_id))
+            job_id = cursor.lastrowid
+            conn.commit()
         
         # Use Celery task for background processing
         try:
@@ -2691,14 +3076,18 @@ def api_scrape_leads(user_id):
                     print(f"Error in scraping job: {e}")
                     import traceback
                     traceback.print_exc()
-                    conn = db.connect()
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        UPDATE lead_scraping_jobs 
-                        SET status = 'failed'
-                        WHERE id = ?
-                    """, (job_id,))
-                    conn.commit()
+                    # Update job status to failed
+                    if hasattr(db, 'use_supabase') and db.use_supabase:
+                        db.update_scraping_job(job_id, status='failed')
+                    else:
+                        conn = db.connect()
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            UPDATE lead_scraping_jobs 
+                            SET status = 'failed'
+                            WHERE id = ?
+                        """, (job_id,))
+                        conn.commit()
             
             thread = threading.Thread(target=run_scraping, daemon=True)
             thread.start()
@@ -2746,19 +3135,63 @@ def api_add_lead(user_id):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/leads/verify/<int:lead_id>', methods=['POST'])
-def api_verify_lead(lead_id):
+@optional_auth
+def api_verify_lead(user_id, lead_id):
     """Verify a lead's email"""
     try:
         from core.email_verifier import EmailVerifier
         verifier = EmailVerifier(db)
         
+        # Verify user owns this lead
+        if user_id:
+            # Check if using Supabase
+            if hasattr(db, 'use_supabase') and db.use_supabase:
+                lead = db.get_lead_by_id(lead_id)
+                if not lead:
+                    return jsonify({'error': 'Lead not found'}), 404
+                if lead.get('user_id') != user_id:
+                    return jsonify({'error': 'Unauthorized'}), 403
+            else:
+                # SQLite
+                conn = db.connect()
+                cursor = conn.cursor()
+                cursor.execute("SELECT user_id FROM leads WHERE id = ?", (lead_id,))
+                row = cursor.fetchone()
+                if row and row[0] != user_id:
+                    return jsonify({'error': 'Unauthorized'}), 403
+        
         result = verifier.verify_lead_email(lead_id)
+        
+        # If verified, add to recipients
+        if result.get('is_valid') and user_id:
+            try:
+                lead = db.get_lead_by_id(lead_id)
+                if lead and lead.get('email'):
+                    # Add to recipients using add_recipients (plural) method
+                    name = lead.get('name', '')
+                    name_parts = name.split(maxsplit=1) if name else []
+                    first_name = name_parts[0] if len(name_parts) > 0 else ''
+                    last_name = name_parts[1] if len(name_parts) > 1 else ''
+                    
+                    db.add_recipients([{
+                        'email': lead['email'],
+                        'first_name': first_name,
+                        'last_name': last_name,
+                        'company': lead.get('company_name', ''),
+                        'list_name': 'verified_leads'
+                    }], user_id=user_id)
+            except Exception as e:
+                print(f"Error adding lead to recipients: {e}")
+        
         return jsonify(result)
     except Exception as e:
+        import traceback
+        print(f"Verify lead error: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/leads/verify/batch', methods=['POST'])
-def api_verify_leads_batch():
+@optional_auth
+def api_verify_leads_batch(user_id):
     """Verify multiple leads"""
     try:
         data = request.json if request.is_json else request.form.to_dict()
@@ -2767,19 +3200,46 @@ def api_verify_leads_batch():
         if not lead_ids:
             return jsonify({'error': 'No lead IDs provided'}), 400
         
+        # Verify user owns these leads
+        if user_id:
+            # Check if using Supabase
+            if hasattr(db, 'use_supabase') and db.use_supabase:
+                # Get all leads and filter by user_id
+                valid_ids = []
+                for lead_id in lead_ids:
+                    lead = db.get_lead_by_id(lead_id)
+                    if lead and lead.get('user_id') == user_id:
+                        valid_ids.append(lead_id)
+                if len(valid_ids) != len(lead_ids):
+                    return jsonify({'error': 'Some leads not found or unauthorized'}), 403
+                lead_ids = valid_ids
+            else:
+                # SQLite
+                conn = db.connect()
+                cursor = conn.cursor()
+                placeholders = ','.join(['?'] * len(lead_ids))
+                cursor.execute(f"SELECT id FROM leads WHERE id IN ({placeholders}) AND user_id = ?", lead_ids + [user_id])
+                valid_ids = [row[0] for row in cursor.fetchall()]
+                if len(valid_ids) != len(lead_ids):
+                    return jsonify({'error': 'Some leads not found or unauthorized'}), 403
+                lead_ids = valid_ids
+        
         from core.email_verifier import EmailVerifier
         verifier = EmailVerifier(db)
         
         results = verifier.verify_batch_leads(lead_ids, delay=1.0)
         return jsonify({'success': True, 'results': results})
     except Exception as e:
+        import traceback
+        print(f"Batch verify error: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/leads/scraping-jobs', methods=['GET'])
-def api_get_scraping_jobs():
+@optional_auth
+def api_get_scraping_jobs(user_id):
     """Get all scraping jobs"""
     try:
-        jobs = db.get_scraping_jobs()
+        jobs = db.get_scraping_jobs(user_id=user_id)
         return jsonify({'success': True, 'jobs': jobs})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -2788,20 +3248,29 @@ def api_get_scraping_jobs():
 def api_get_scraping_job_status(job_id):
     """Get real-time status of a scraping job"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM lead_scraping_jobs WHERE id = ?", (job_id,))
-        row = cursor.fetchone()
+        # Check if using Supabase
+        if hasattr(db, 'use_supabase') and db.use_supabase:
+            # Use Supabase methods
+            job = db.get_scraping_job(job_id)
+            if not job:
+                return jsonify({'error': 'Job not found'}), 404
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM lead_scraping_jobs WHERE id = ?", (job_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return jsonify({'error': 'Job not found'}), 404
+            
+            job = dict(row)
         
-        if not row:
-            return jsonify({'error': 'Job not found'}), 404
-        
-        job = dict(row)
         return jsonify({
             'success': True,
             'job': {
                 'id': job['id'],
-                'status': job['status'],
+                'status': job.get('status', ''),
                 'current_step': job.get('current_step', ''),
                 'progress_percent': job.get('progress_percent', 0),
                 'companies_found': job.get('companies_found', 0),
@@ -2810,10 +3279,13 @@ def api_get_scraping_job_status(job_id):
             }
         })
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/leads/recent', methods=['GET'])
-def api_get_recent_leads():
+@optional_auth
+def api_get_recent_leads(user_id):
     """Get recently added/updated leads for real-time updates"""
     try:
         limit = request.args.get('limit', 50, type=int)
@@ -2824,6 +3296,10 @@ def api_get_recent_leads():
         
         query = "SELECT * FROM leads WHERE 1=1"
         params = []
+        
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
         
         if job_id:
             query += " AND source = ?"
@@ -3026,7 +3502,7 @@ def api_get_subscription_info(user_id):
 @app.route('/api/settings/test-redis', methods=['POST'])
 @optional_auth
 def api_test_redis(user_id):
-    """Test Redis connection"""
+    """Test Redis connection - DYNAMIC"""
     try:
         data = request.json if request.is_json else request.form.to_dict()
         redis_url = data.get('redis_url') or settings_manager.get_setting('REDIS_URL', user_id=user_id) or os.getenv('REDIS_URL')
@@ -3036,11 +3512,78 @@ def api_test_redis(user_id):
         
         try:
             import redis
-            r = redis.from_url(redis_url)
+            # Handle SSL connections (Upstash, etc.)
+            ssl_params = {}
+            if 'rediss://' in redis_url or 'ssl=true' in redis_url.lower():
+                # For SSL connections, disable certificate verification if needed
+                # Upstash and some providers use self-signed certificates
+                ssl_params = {
+                    'ssl_cert_reqs': None,  # Disable certificate verification
+                    'ssl_check_hostname': False
+                }
+            
+            r = redis.from_url(redis_url, socket_connect_timeout=5, socket_timeout=5, **ssl_params)
             r.ping()
-            return jsonify({'success': True, 'message': 'Redis connection successful'})
-        except Exception as e:
+            
+            # Test basic operations
+            test_key = 'anagha_test_connection'
+            r.set(test_key, 'test', ex=10)
+            value = r.get(test_key)
+            r.delete(test_key)
+            
+            return jsonify({
+                'success': True, 
+                'message': 'Redis connection successful',
+                'details': {
+                    'host': redis_url.split('@')[-1].split('/')[0] if '@' in redis_url else redis_url.split('/')[-1],
+                    'test_operation': 'passed',
+                    'timestamp': datetime.now().isoformat()
+                }
+            })
+        except redis.ConnectionError as e:
             return jsonify({'success': False, 'error': f'Redis connection failed: {str(e)}'})
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'Redis error: {str(e)}'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/settings/redis-status', methods=['GET'])
+@optional_auth
+def api_get_redis_status(user_id):
+    """Get Redis connection status - DYNAMIC"""
+    try:
+        redis_url = settings_manager.get_setting('REDIS_URL', user_id=user_id) or os.getenv('REDIS_URL')
+        connected = False
+        error_message = None
+        
+        if redis_url:
+            try:
+                import redis
+                # Handle SSL connections (Upstash, etc.)
+                ssl_params = {}
+                if 'rediss://' in redis_url or 'ssl=true' in redis_url.lower():
+                    ssl_params = {
+                        'ssl_cert_reqs': None,  # Disable certificate verification
+                        'ssl_check_hostname': False
+                    }
+                
+                r = redis.from_url(redis_url, socket_connect_timeout=3, socket_timeout=3, **ssl_params)
+                r.ping()
+                connected = True
+            except Exception as e:
+                error_message = str(e)
+        else:
+            error_message = 'Redis URL not configured'
+        
+        return jsonify({
+            'success': True,
+            'status': {
+                'connected': connected,
+                'configured': bool(redis_url),
+                'error': error_message,
+                'timestamp': datetime.now().isoformat()
+            }
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

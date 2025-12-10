@@ -12,11 +12,28 @@ load_dotenv()
 # Redis configuration
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 
+# Handle SSL for Redis (Upstash, etc.)
+broker_transport_options = {}
+backend_transport_options = {}
+
+if 'rediss://' in redis_url or 'ssl=true' in redis_url.lower():
+    # For SSL connections, disable certificate verification if needed
+    broker_transport_options = {
+        'ssl_cert_reqs': None,  # Disable certificate verification
+        'ssl_check_hostname': False
+    }
+    backend_transport_options = {
+        'ssl_cert_reqs': None,
+        'ssl_check_hostname': False
+    }
+
 # Create Celery app
 celery_app = Celery(
     'anagha_solution',
     broker=redis_url,
-    backend=redis_url
+    backend=redis_url,
+    broker_transport_options=broker_transport_options,
+    result_backend_transport_options=backend_transport_options
 )
 
 # Celery configuration

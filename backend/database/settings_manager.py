@@ -134,19 +134,15 @@ class SettingsManager:
         self._update_env_if_needed(key, value_str)
     
     def _update_env_if_needed(self, key: str, value: str):
-        """Update .env file for critical settings"""
-        critical_keys = [
-            'SUPABASE_URL', 'SUPABASE_KEY', 'DATABASE_TYPE',
-            'JWT_SECRET_KEY', 'STRIPE_SECRET_KEY', 'REDIS_URL',
-            'PERPLEXITY_API_KEY', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL'
-        ]
-        
-        if key.upper() in critical_keys:
-            try:
-                from core.config import Config
-                Config._update_env_file(key.upper(), value)
-            except:
-                pass
+        """Update .env file for ALL settings - IMMEDIATELY PERSISTENT"""
+        # Always update .env file for any setting change
+        try:
+            from core.config import Config
+            # Normalize key to uppercase
+            normalized_key = key.upper()
+            Config._update_env_file(normalized_key, value)
+        except Exception as e:
+            print(f"Warning: Could not update .env file for {key}: {e}")
     
     def get_all_settings(self, user_id: int = None) -> Dict[str, Any]:
         """Get all settings"""

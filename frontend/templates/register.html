@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+
+{% block title %}Register - ANAGHA SOLUTION{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-user-plus"></i> Register</h1>
+</div>
+
+<div class="form-container" style="max-width: 500px; margin: 0 auto;">
+    <form id="registerForm">
+        <div class="form-group">
+            <label for="email">Email Address *</label>
+            <input type="email" id="email" name="email" required 
+                   placeholder="your@email.com"
+                   style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+        </div>
+        
+        <div class="form-group">
+            <label for="password">Password *</label>
+            <input type="password" id="password" name="password" required 
+                   placeholder="Minimum 8 characters"
+                   minlength="8"
+                   style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+            <small style="color: #7f8c8d;">Must be at least 8 characters long</small>
+        </div>
+        
+        <div class="form-group">
+            <label for="confirmPassword">Confirm Password *</label>
+            <input type="password" id="confirmPassword" name="confirmPassword" required 
+                   placeholder="Re-enter your password"
+                   style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+        </div>
+        
+        <div class="form-group">
+            <label for="firstName">First Name</label>
+            <input type="text" id="firstName" name="first_name" 
+                   placeholder="John"
+                   style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+        </div>
+        
+        <div class="form-group">
+            <label for="lastName">Last Name</label>
+            <input type="text" id="lastName" name="last_name" 
+                   placeholder="Doe"
+                   style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+        </div>
+        
+        <div class="form-group">
+            <label for="companyName">Company Name</label>
+            <input type="text" id="companyName" name="company_name" 
+                   placeholder="Your Company"
+                   style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+        </div>
+        
+        <div class="form-group">
+            <label>
+                <input type="checkbox" id="agreeTerms" required>
+                I agree to the <a href="/terms" target="_blank">Terms of Service</a> and <a href="/privacy" target="_blank">Privacy Policy</a> *
+            </label>
+        </div>
+        
+        <div class="form-group">
+            <button type="submit" class="btn btn-primary" style="width: 100%; padding: 12px;">
+                <i class="fas fa-user-plus"></i> Create Account
+            </button>
+        </div>
+        
+        <div style="text-align: center; margin-top: 15px;">
+            <p>Already have an account? <a href="/login" style="color: #3498db;">Login here</a></p>
+        </div>
+    </form>
+    
+    <div id="registerStatus" style="margin-top: 15px;"></div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Initialize auth
+if (typeof AuthManager !== 'undefined') {
+    AuthManager.init();
+}
+
+// Check if already logged in - validate token first (non-blocking)
+(async function() {
+    // Wait a bit for AuthManager to be ready
+    await new Promise(resolve => setTimeout(resolve, 200));
+    
+    if (typeof AuthManager !== 'undefined' && AuthManager.isAuthenticated()) {
+        try {
+            const isValid = await AuthManager.validateToken();
+            if (isValid) {
+                // Already logged in with valid token, redirect to dashboard
+                console.log('Already authenticated, redirecting to dashboard');
+                window.location.href = '/';
+            }
+        } catch (error) {
+            // Token validation failed, stay on register page
+            console.log('Token validation failed, staying on register page');
+        }
+    }
+})();
+
+document.getElementById('registerForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const password = document.getElementById('password').value;
+    const confirmPassword = document.getElementById('confirmPassword').value;
+    
+    if (password !== confirmPassword) {
+        document.getElementById('registerStatus').innerHTML = 
+            '<div style="color: #e74c3c;"><i class="fas fa-times"></i> Passwords do not match</div>';
+        return;
+    }
+    
+    if (password.length < 8) {
+        document.getElementById('registerStatus').innerHTML = 
+            '<div style="color: #e74c3c;"><i class="fas fa-times"></i> Password must be at least 8 characters</div>';
+        return;
+    }
+    
+    const formData = {
+        email: document.getElementById('email').value,
+        password: password,
+        first_name: document.getElementById('firstName').value,
+        last_name: document.getElementById('lastName').value,
+        company_name: document.getElementById('companyName').value
+    };
+    
+    const statusDiv = document.getElementById('registerStatus');
+    statusDiv.innerHTML = '<div style="color: #3498db;"><i class="fas fa-spinner fa-spin"></i> Creating account...</div>';
+    
+    try {
+        const response = await axios.post('/api/auth/register', formData);
+        
+        if (response.data.success && response.data.token) {
+            // Store token
+            if (typeof AuthManager !== 'undefined') {
+                AuthManager.setToken(response.data.token, true);
+            } else {
+                localStorage.setItem('jwt_token', response.data.token);
+                axios.defaults.headers.common['Authorization'] = `Bearer ${response.data.token}`;
+            }
+            
+            statusDiv.innerHTML = '<div style="color: #27ae60;"><i class="fas fa-check"></i> Account created! Redirecting...</div>';
+            
+            // Redirect to dashboard
+            setTimeout(() => {
+                window.location.href = '/';
+            }, 1500);
+        } else {
+            statusDiv.innerHTML = '<div style="color: #e74c3c;">Registration failed: ' + (response.data.error || 'Unknown error') + '</div>';
+        }
+    } catch (error) {
+        const errorMsg = error.response?.data?.error || error.message || 'Registration failed';
+        statusDiv.innerHTML = '<div style="color: #e74c3c;"><i class="fas fa-times"></i> Error: ' + errorMsg + '</div>';
+    }
+});
+</script>
+{% endblock %}
+

@@ -91,11 +91,32 @@ def verify_email_task(lead_id: int, user_id: int):
 def scrape_leads_task(icp_description: str, job_id: int, user_id: int):
     """Background task to scrape leads"""
     try:
+        from database.db_manager import DatabaseManager
         db = DatabaseManager()
         scraper = LeadScraper(db)
-        result = scraper.run_full_scraping_job(icp_description, job_id=job_id)
+        result = scraper.run_full_scraping_job(icp_description, job_id=job_id, user_id=user_id)
         return result
     except Exception as e:
+        import traceback
+        print(f"Scrape leads task error: {traceback.format_exc()}")
+        # Update job status
+        try:
+            # Check if using Supabase
+            if hasattr(db, 'use_supabase') and db.use_supabase:
+                db.update_scraping_job(job_id, status='failed', current_step=f"Error: {str(e)}")
+            else:
+                conn = db.connect()
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE lead_scraping_jobs 
+                    SET status = 'failed', current_step = ?
+                    WHERE id = ?
+                """, (f"Error: {str(e)}", job_id))
+                conn.commit()
+        except Exception as update_error:
+            print(f"Error updating job status: {update_error}")
+            import traceback
+            traceback.print_exc()
         return {'success': False, 'error': str(e)}
 
 @celery_app.task(name='core.tasks.monitor_inbox_task')

@@ -17,16 +17,33 @@ class SupabaseSchema:
         try:
             # Check if users table exists
             try:
+                result = self.client.client.table('users').select('id').limit(1).execute()
+                if result.data is not None:
+                    print("✓ Supabase tables already exist")
+                    return True
+            except Exception as check_error:
+                # Table might not exist, try to create
+                print(f"Tables check: {check_error}")
+            
+            # Tables don't exist, create them
+            print("Creating Supabase tables...")
+            self._create_tables()
+            
+            # Verify creation by checking again
+            try:
                 self.client.client.table('users').select('id').limit(1).execute()
-                print("✓ Tables already exist")
+                print("✓ Supabase tables created successfully")
                 return True
             except:
-                # Tables don't exist, create them
-                print("Creating Supabase tables...")
-                self._create_tables()
-                return True
+                print("⚠️  Tables may need manual creation")
+                return False
+                
         except Exception as e:
             print(f"Error checking/creating tables: {e}")
+            import traceback
+            traceback.print_exc()
+            # Save migration file as fallback
+            self._save_migration_file(self._get_sql_statements())
             return False
     
     def _create_tables(self):
@@ -46,7 +63,7 @@ class SupabaseSchema:
             # Users table
             """
             CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
+                id BIGSERIAL PRIMARY KEY,
                 email TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 first_name TEXT,
@@ -66,8 +83,8 @@ class SupabaseSchema:
             # Leads table
             """
             CREATE TABLE IF NOT EXISTS leads (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
                 name TEXT,
                 company_name TEXT NOT NULL,
                 domain TEXT,
@@ -86,15 +103,15 @@ class SupabaseSchema:
             # Campaigns table
             """
             CREATE TABLE IF NOT EXISTS campaigns (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 subject TEXT NOT NULL,
                 sender_name TEXT NOT NULL,
                 sender_email TEXT NOT NULL,
                 reply_to TEXT,
                 html_content TEXT,
-                template_id INTEGER,
+                template_id BIGINT,
                 status TEXT DEFAULT 'draft',
                 use_personalization INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT NOW(),
@@ -106,8 +123,8 @@ class SupabaseSchema:
             # Recipients table
             """
             CREATE TABLE IF NOT EXISTS recipients (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
                 email TEXT NOT NULL,
                 first_name TEXT,
                 last_name TEXT,
@@ -125,8 +142,8 @@ class SupabaseSchema:
             # SMTP servers table
             """
             CREATE TABLE IF NOT EXISTS smtp_servers (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 host TEXT NOT NULL,
                 port INTEGER NOT NULL,
@@ -141,10 +158,21 @@ class SupabaseSchema:
                 imap_port INTEGER DEFAULT 993,
                 save_to_sent INTEGER DEFAULT 1,
                 provider_type TEXT DEFAULT 'smtp',
+                incoming_protocol TEXT DEFAULT 'imap',
+                pop3_host TEXT,
+                pop3_port INTEGER DEFAULT 995,
+                pop3_ssl INTEGER DEFAULT 1,
+                pop3_leave_on_server INTEGER DEFAULT 1,
                 daily_sent_count INTEGER DEFAULT 0,
                 last_sent_date DATE,
                 warmup_stage INTEGER DEFAULT 0,
                 warmup_emails_sent INTEGER DEFAULT 0,
+                oauth_token TEXT,
+                oauth_refresh_token TEXT,
+                warmup_start_date DATE,
+                warmup_last_sent_date DATE,
+                warmup_open_rate REAL DEFAULT 0.0,
+                warmup_reply_rate REAL DEFAULT 0.0,
                 created_at TIMESTAMP DEFAULT NOW()
             );
             """,
@@ -152,10 +180,10 @@ class SupabaseSchema:
             # Email queue table
             """
             CREATE TABLE IF NOT EXISTS email_queue (
-                id SERIAL PRIMARY KEY,
-                campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
-                recipient_id INTEGER REFERENCES recipients(id) ON DELETE CASCADE,
-                smtp_server_id INTEGER REFERENCES smtp_servers(id) ON DELETE SET NULL,
+                id BIGSERIAL PRIMARY KEY,
+                campaign_id BIGINT REFERENCES campaigns(id) ON DELETE CASCADE,
+                recipient_id BIGINT REFERENCES recipients(id) ON DELETE CASCADE,
+                smtp_server_id BIGINT REFERENCES smtp_servers(id) ON DELETE SET NULL,
                 status TEXT DEFAULT 'pending',
                 priority INTEGER DEFAULT 5,
                 error_message TEXT,
@@ -164,11 +192,33 @@ class SupabaseSchema:
             );
             """,
             
+            # Sent emails table
+            """
+            CREATE TABLE IF NOT EXISTS sent_emails (
+                id BIGSERIAL PRIMARY KEY,
+                campaign_id BIGINT REFERENCES campaigns(id) ON DELETE CASCADE,
+                recipient_id BIGINT REFERENCES recipients(id) ON DELETE CASCADE,
+                smtp_server_id BIGINT REFERENCES smtp_servers(id) ON DELETE SET NULL,
+                recipient_email TEXT NOT NULL,
+                recipient_name TEXT,
+                sender_email TEXT NOT NULL,
+                sender_name TEXT,
+                subject TEXT NOT NULL,
+                html_content TEXT,
+                text_content TEXT,
+                sent_at TIMESTAMP DEFAULT NOW(),
+                status TEXT DEFAULT 'sent',
+                message_id TEXT,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+            """,
+            
             # Lead scraping jobs table
             """
             CREATE TABLE IF NOT EXISTS lead_scraping_jobs (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
                 icp_description TEXT NOT NULL,
                 status TEXT DEFAULT 'pending',
                 companies_found INTEGER DEFAULT 0,
@@ -184,13 +234,115 @@ class SupabaseSchema:
             # Settings table
             """
             CREATE TABLE IF NOT EXISTS app_settings (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
                 setting_key TEXT NOT NULL,
                 setting_value TEXT,
                 created_at TIMESTAMP DEFAULT NOW(),
                 updated_at TIMESTAMP DEFAULT NOW(),
                 UNIQUE(user_id, setting_key)
+            );
+            """,
+            
+            # Templates table
+            """
+            CREATE TABLE IF NOT EXISTS templates (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                subject TEXT,
+                html_content TEXT,
+                text_content TEXT,
+                category TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+            """,
+            
+            # Email responses table
+            """
+            CREATE TABLE IF NOT EXISTS email_responses (
+                id BIGSERIAL PRIMARY KEY,
+                sent_email_id BIGINT REFERENCES sent_emails(id) ON DELETE CASCADE,
+                recipient_email TEXT NOT NULL,
+                subject TEXT,
+                response_type TEXT DEFAULT 'reply',
+                is_hot_lead INTEGER DEFAULT 0,
+                follow_up_needed INTEGER DEFAULT 0,
+                follow_up_date TIMESTAMP,
+                response_content TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+            """,
+            
+            # Email tracking table
+            """
+            CREATE TABLE IF NOT EXISTS email_tracking (
+                id BIGSERIAL PRIMARY KEY,
+                campaign_id BIGINT REFERENCES campaigns(id) ON DELETE CASCADE,
+                recipient_id BIGINT REFERENCES recipients(id) ON DELETE CASCADE,
+                email_address TEXT NOT NULL,
+                sent_at TIMESTAMP,
+                opened_at TIMESTAMP,
+                clicked_at TIMESTAMP,
+                bounced INTEGER DEFAULT 0,
+                unsubscribed INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+            """,
+            
+            # Daily stats table
+            """
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                date DATE NOT NULL,
+                emails_sent INTEGER DEFAULT 0,
+                emails_delivered INTEGER DEFAULT 0,
+                emails_opened INTEGER DEFAULT 0,
+                emails_clicked INTEGER DEFAULT 0,
+                emails_bounced INTEGER DEFAULT 0,
+                emails_unsubscribed INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(user_id, date)
+            );
+            """,
+            
+            # LLM usage metrics table
+            """
+            CREATE TABLE IF NOT EXISTS llm_usage_metrics (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                metric_date DATE NOT NULL,
+                tokens_used INTEGER DEFAULT 0,
+                api_calls INTEGER DEFAULT 0,
+                cost REAL DEFAULT 0.0,
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(user_id, metric_date)
+            );
+            """,
+            
+            # Observability metrics table
+            """
+            CREATE TABLE IF NOT EXISTS observability_metrics (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                metric_name TEXT NOT NULL,
+                metric_value REAL NOT NULL,
+                tags TEXT,
+                recorded_at TIMESTAMP DEFAULT NOW()
+            );
+            """,
+            
+            # Alerts table
+            """
+            CREATE TABLE IF NOT EXISTS alerts (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                alert_type TEXT NOT NULL,
+                alert_message TEXT NOT NULL,
+                severity TEXT DEFAULT 'info',
+                is_resolved INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW()
             );
             """,
             
@@ -202,6 +354,11 @@ class SupabaseSchema:
             CREATE INDEX IF NOT EXISTS idx_recipients_user_id ON recipients(user_id);
             CREATE INDEX IF NOT EXISTS idx_smtp_servers_user_id ON smtp_servers(user_id);
             CREATE INDEX IF NOT EXISTS idx_email_queue_status ON email_queue(status);
+            CREATE INDEX IF NOT EXISTS idx_sent_emails_campaign_id ON sent_emails(campaign_id);
+            CREATE INDEX IF NOT EXISTS idx_sent_emails_recipient_id ON sent_emails(recipient_id);
+            CREATE INDEX IF NOT EXISTS idx_sent_emails_sent_at ON sent_emails(sent_at);
+            CREATE INDEX IF NOT EXISTS idx_email_responses_recipient ON email_responses(recipient_email);
+            CREATE INDEX IF NOT EXISTS idx_email_responses_followup ON email_responses(follow_up_needed, follow_up_date);
             CREATE INDEX IF NOT EXISTS idx_settings_user_key ON app_settings(user_id, setting_key);
             """
         ]

@@ -174,7 +174,49 @@ let allLeads = [];
 let selectedLeads = [];
 
 // Load leads on page load
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
+    // Wait for AuthManager to be ready
+    await new Promise(resolve => setTimeout(resolve, 200));
+    
+    // Initialize auth
+    if (typeof AuthManager !== 'undefined') {
+        AuthManager.init();
+    }
+    
+    // Check authentication - validate token with backend
+    if (typeof AuthManager !== 'undefined') {
+        const token = AuthManager.getToken();
+        if (token) {
+            // Validate token with backend
+            try {
+                const isValid = await AuthManager.validateToken();
+                if (!isValid) {
+                    showAlert('Session expired. Please login again.', 'error');
+                    setTimeout(() => {
+                        window.location.href = '/login';
+                    }, 1500);
+                    return;
+                }
+                // Token is valid, continue loading leads
+            } catch (error) {
+                // Validation error - redirect to login
+                showAlert('Authentication error. Please login again.', 'error');
+                setTimeout(() => {
+                    window.location.href = '/login';
+                }, 1500);
+                return;
+            }
+        } else {
+            // No token - redirect to login
+            showAlert('Please login to access leads.', 'error');
+            setTimeout(() => {
+                window.location.href = '/login';
+            }, 1500);
+            return;
+        }
+    }
+    
+    // Load leads if authenticated
     loadLeads();
     
     // Auto-refresh leads every 5 seconds to show status updates
@@ -287,14 +329,16 @@ function verifyLead(leadId) {
     
     axios.post(`/api/leads/verify/${leadId}`)
         .then(response => {
-            if (response.data.success) {
-                const isVerified = response.data.is_verified || false;
+            if (response.data.success || response.data.is_valid) {
+                const isVerified = response.data.is_valid || response.data.verification_result?.is_valid || false;
                 updateLeadStatus(leadId, isVerified);
                 
                 if (isVerified) {
                     showAlert('Lead verified successfully and added to recipients!', 'success');
+                    // Reload leads to update status
+                    loadLeads();
                 } else {
-                    showAlert('Lead verification failed: ' + (response.data.verification_result?.message || 'Unknown error'), 'error');
+                    showAlert('Lead verification failed: ' + (response.data.verification_result?.message || response.data.message || 'Unknown error'), 'error');
                 }
                 
                 // Reload leads to get updated list

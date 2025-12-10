@@ -80,13 +80,13 @@
         </div>
         
         <div class="form-group">
-            <label>Select SMTP Servers (Select exactly 4 servers) *</label>
+            <label>Select SMTP Servers (Select at least 1 server) *</label>
             <div id="smtpServersList" style="background: #f8f9fa; padding: 15px; border-radius: 5px; border: 1px solid #dee2e6;">
                 <div style="display: flex; align-items: center; margin-bottom: 10px;">
                     <span style="color: #7f8c8d; font-size: 14px;">
-                        <i class="fas fa-info-circle"></i> Select exactly 4 SMTP servers. Each server will send 20 emails.
+                        <i class="fas fa-info-circle"></i> Select one or more SMTP servers. Emails will be distributed evenly across selected servers.
                     </span>
-                    <span id="selectedCount" style="margin-left: auto; font-weight: bold; color: #3498db;">0/4 selected</span>
+                    <span id="selectedCount" style="margin-left: auto; font-weight: bold; color: #3498db;">0 selected</span>
                 </div>
                 <div id="smtpServersContainer" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px;">
                     <p style="color: #7f8c8d; grid-column: 1 / -1;">Loading SMTP servers...</p>
@@ -169,7 +169,8 @@ let autoSaveEnabled = true;
 
 // SMTP Server Selection
 let selectedSmtpServers = [];
-const MAX_SELECTED_SERVERS = 4;
+const MIN_SELECTED_SERVERS = 1; // Minimum 1 server required
+const MAX_SELECTED_SERVERS = 10; // Maximum 10 servers (can be adjusted)
 
 // Load SMTP servers on page load
 async function loadSmtpServers() {
@@ -241,11 +242,14 @@ function toggleSmtpServer(serverId, isChecked, checkboxElement) {
 
 function updateSelectedCount() {
     const countElement = document.getElementById('selectedCount');
-    countElement.textContent = `${selectedSmtpServers.length}/${MAX_SELECTED_SERVERS} selected`;
+    const count = selectedSmtpServers.length;
+    countElement.textContent = `${count} selected`;
     
-    if (selectedSmtpServers.length === MAX_SELECTED_SERVERS) {
+    if (count >= MIN_SELECTED_SERVERS && count <= MAX_SELECTED_SERVERS) {
         countElement.style.color = '#27ae60';
-    } else if (selectedSmtpServers.length > 0) {
+    } else if (count > MAX_SELECTED_SERVERS) {
+        countElement.style.color = '#e74c3c';
+    } else if (count > 0) {
         countElement.style.color = '#f39c12';
     } else {
         countElement.style.color = '#3498db';
@@ -429,11 +433,19 @@ document.getElementById('campaignForm').addEventListener('submit', async functio
     
     // Validate SMTP server selection (only if sending now)
     const sendNow = document.getElementById('sendNowCheckbox').checked;
-    if (sendNow && selectedSmtpServers.length !== MAX_SELECTED_SERVERS) {
-        showAlert(`Please select exactly ${MAX_SELECTED_SERVERS} SMTP servers before sending.`, 'error');
-        document.getElementById('smtpSelectionError').textContent = 
-            `Please select exactly ${MAX_SELECTED_SERVERS} SMTP servers.`;
-        return;
+    if (sendNow) {
+        if (selectedSmtpServers.length < MIN_SELECTED_SERVERS) {
+            showAlert(`Please select at least ${MIN_SELECTED_SERVERS} SMTP server${MIN_SELECTED_SERVERS > 1 ? 's' : ''} before sending.`, 'error');
+            document.getElementById('smtpSelectionError').textContent = 
+                `Please select at least ${MIN_SELECTED_SERVERS} SMTP server${MIN_SELECTED_SERVERS > 1 ? 's' : ''}.`;
+            return;
+        }
+        if (selectedSmtpServers.length > MAX_SELECTED_SERVERS) {
+            showAlert(`Please select at most ${MAX_SELECTED_SERVERS} SMTP servers.`, 'error');
+            document.getElementById('smtpSelectionError').textContent = 
+                `Maximum ${MAX_SELECTED_SERVERS} servers allowed.`;
+            return;
+        }
     }
     
     const formData = new FormData(e.target);

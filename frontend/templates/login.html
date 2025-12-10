@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+
+{% block title %}Login - ANAGHA SOLUTION{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-sign-in-alt"></i> Login</h1>
+</div>
+
+<div class="form-container" style="max-width: 500px; margin: 0 auto;">
+    <form id="loginForm">
+        <div class="form-group">
+            <label for="email">Email Address</label>
+            <input type="email" id="email" name="email" required 
+                   placeholder="your@email.com"
+                   style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+        </div>
+        
+        <div class="form-group">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required 
+                   placeholder="Enter your password"
+                   style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+            <button type="button" class="btn btn-sm btn-secondary" onclick="togglePasswordVisibility('password')" 
+                    style="margin-top: 5px;">
+                <i class="fas fa-eye"></i> Show/Hide
+            </button>
+        </div>
+        
+        <div class="form-group">
+            <label>
+                <input type="checkbox" id="remember" name="remember">
+                Remember me
+            </label>
+        </div>
+        
+        <div class="form-group">
+            <button type="submit" class="btn btn-primary" style="width: 100%; padding: 12px;">
+                <i class="fas fa-sign-in-alt"></i> Login
+            </button>
+        </div>
+        
+        <div style="text-align: center; margin-top: 15px;">
+            <p>Don't have an account? <a href="/register" style="color: #3498db;">Register here</a></p>
+        </div>
+    </form>
+    
+    <div id="loginStatus" style="margin-top: 15px;"></div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Initialize auth
+if (typeof AuthManager !== 'undefined') {
+    AuthManager.init();
+}
+
+// Check if already logged in - validate token first (non-blocking)
+(async function() {
+    // Wait a bit for AuthManager to be ready
+    await new Promise(resolve => setTimeout(resolve, 200));
+    
+    if (typeof AuthManager !== 'undefined' && AuthManager.isAuthenticated()) {
+        try {
+            const isValid = await AuthManager.validateToken();
+            if (isValid) {
+                // Already logged in with valid token, redirect to dashboard
+                console.log('Already authenticated, redirecting to dashboard');
+                window.location.href = '/';
+            }
+        } catch (error) {
+            // Token validation failed, stay on login page
+            console.log('Token validation failed, staying on login page');
+        }
+    }
+})();
+
+function togglePasswordVisibility(inputId) {
+    const input = document.getElementById(inputId);
+    if (input.type === 'password') {
+        input.type = 'text';
+    } else {
+        input.type = 'password';
+    }
+}
+
+document.getElementById('loginForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
+    const remember = document.getElementById('remember').checked;
+    const statusDiv = document.getElementById('loginStatus');
+    
+    statusDiv.innerHTML = '<div style="color: #3498db;"><i class="fas fa-spinner fa-spin"></i> Logging in...</div>';
+    
+    try {
+        const response = await axios.post('/api/auth/login', {
+            email: email,
+            password: password
+        });
+        
+        if (response.data.success && response.data.token) {
+            const token = response.data.token;
+            
+            // Store token immediately
+            if (remember) {
+                localStorage.setItem('jwt_token', token);
+            } else {
+                sessionStorage.setItem('jwt_token', token);
+            }
+            
+            // Set axios header immediately
+            if (typeof axios !== 'undefined') {
+                axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+            }
+            
+            // Also update AuthManager if available
+            if (typeof AuthManager !== 'undefined') {
+                AuthManager.setToken(token, remember);
+            }
+            
+            statusDiv.innerHTML = '<div style="color: #27ae60;"><i class="fas fa-check"></i> Login successful! Redirecting...</div>';
+            
+            // Verify token works before redirecting
+            try {
+                const verifyResponse = await axios.get('/api/auth/me', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                
+                if (verifyResponse.data.success) {
+                    // Token is valid, redirect
+                    setTimeout(() => {
+                        window.location.href = '/';
+                    }, 500);
+                } else {
+                    statusDiv.innerHTML = '<div style="color: #e74c3c;">Token validation failed. Please try again.</div>';
+                }
+            } catch (verifyError) {
+                console.error('Token verification error:', verifyError);
+                // Still redirect, let the page handle it
+                setTimeout(() => {
+                    window.location.href = '/';
+                }, 500);
+            }
+        } else {
+            statusDiv.innerHTML = '<div style="color: #e74c3c;">Login failed: ' + (response.data.error || 'Unknown error') + '</div>';
+        }
+    } catch (error) {
+        const errorMsg = error.response?.data?.error || error.message || 'Login failed';
+        statusDiv.innerHTML = '<div style="color: #e74c3c;"><i class="fas fa-times"></i> Error: ' + errorMsg + '</div>';
+    }
+});
+</script>
+{% endblock %}
+

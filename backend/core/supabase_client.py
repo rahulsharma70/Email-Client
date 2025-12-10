@@ -53,15 +53,17 @@ class SupabaseClient:
             self._connect()
         
         try:
-            query = self.client.table(table)
-            
-            # Apply filters
-            if filters:
-                for key, value in filters.items():
-                    query = query.eq(key, value)
-            
-            # Execute operation
+            # Execute operation - each operation has different pattern
             if operation == 'select':
+                # SELECT: table().select('*').eq().order().limit()
+                query = self.client.table(table).select('*')
+                
+                # Apply filters using .eq() after .select()
+                if filters:
+                    for key, value in filters.items():
+                        query = query.eq(key, value)
+                
+                # Apply ordering
                 if order_by:
                     parts = order_by.split('.')
                     if len(parts) == 2:
@@ -69,26 +71,45 @@ class SupabaseClient:
                     else:
                         query = query.order(parts[0])
                 
+                # Apply limit
                 if limit:
                     query = query.limit(limit)
                 
+                # Execute query
                 result = query.execute()
                 return result.data if result.data else []
             
             elif operation == 'insert':
+                # INSERT: table().insert(data).execute()
                 if not data:
                     raise ValueError("Data required for insert operation")
-                result = query.insert(data).execute()
+                result = self.client.table(table).insert(data).execute()
                 return result.data if result.data else []
             
             elif operation == 'update':
+                # UPDATE: table().update(data).eq().execute()
                 if not data:
                     raise ValueError("Data required for update operation")
-                result = query.update(data).execute()
+                query = self.client.table(table).update(data)
+                
+                # Apply filters using .eq()
+                if filters:
+                    for key, value in filters.items():
+                        query = query.eq(key, value)
+                
+                result = query.execute()
                 return result.data if result.data else []
             
             elif operation == 'delete':
-                result = query.delete().execute()
+                # DELETE: table().delete().eq().execute()
+                query = self.client.table(table).delete()
+                
+                # Apply filters using .eq()
+                if filters:
+                    for key, value in filters.items():
+                        query = query.eq(key, value)
+                
+                result = query.execute()
                 return result.data if result.data else []
             
             else:
@@ -98,9 +119,11 @@ class SupabaseClient:
             raise Exception(f"Supabase query error: {e}")
     
     def insert(self, table: str, data: Dict) -> Dict:
-        """Insert single record"""
-        result = self.execute_query(table, 'insert', data=data)
-        return result[0] if result else {}
+        """Insert single record - direct call"""
+        if not self.client:
+            self._connect()
+        result = self.client.table(table).insert(data).execute()
+        return result.data[0] if result.data and len(result.data) > 0 else {}
     
     def select(self, table: str, filters: Dict = None, 
                limit: int = None, order_by: str = None) -> List[Dict]:
@@ -109,12 +132,32 @@ class SupabaseClient:
                                  limit=limit, order_by=order_by)
     
     def update(self, table: str, filters: Dict, data: Dict) -> List[Dict]:
-        """Update records"""
-        return self.execute_query(table, 'update', filters=filters, data=data)
+        """Update records - direct call"""
+        if not self.client:
+            self._connect()
+        query = self.client.table(table).update(data)
+        
+        # Apply filters using .eq()
+        if filters:
+            for key, value in filters.items():
+                query = query.eq(key, value)
+        
+        result = query.execute()
+        return result.data if result.data else []
     
     def delete(self, table: str, filters: Dict) -> List[Dict]:
-        """Delete records"""
-        return self.execute_query(table, 'delete', filters=filters)
+        """Delete records - direct call"""
+        if not self.client:
+            self._connect()
+        query = self.client.table(table).delete()
+        
+        # Apply filters using .eq()
+        if filters:
+            for key, value in filters.items():
+                query = query.eq(key, value)
+        
+        result = query.execute()
+        return result.data if result.data else []
     
     def execute_sql(self, sql: str, params: List = None) -> Any:
         """

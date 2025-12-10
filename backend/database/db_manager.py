@@ -533,10 +533,19 @@ class DatabaseManager:
                        pop3_host: str = None, pop3_port: int = 995,
                        pop3_ssl: bool = True, pop3_leave_on_server: bool = True,
                        incoming_protocol: str = 'imap', user_id: int = None,
-                       provider_type: str = 'smtp'):
-        """Add a new SMTP server with IMAP and POP3 settings"""
+                       provider_type: str = 'smtp', oauth_token: str = None,
+                       oauth_refresh_token: str = None):
+        """Add a new SMTP server with IMAP and POP3 settings - ENCRYPTED"""
+        from core.encryption import get_encryption_manager
+        encryptor = get_encryption_manager()
+        
         conn = self.connect()
         cursor = conn.cursor()
+        
+        # Encrypt sensitive data
+        encrypted_password = encryptor.encrypt(password)
+        encrypted_oauth = encryptor.encrypt(oauth_token) if oauth_token else None
+        encrypted_refresh = encryptor.encrypt(oauth_refresh_token) if oauth_refresh_token else None
         
         # Check if this is the first server for this user - set as default
         if user_id:
@@ -556,12 +565,12 @@ class DatabaseManager:
             INSERT INTO smtp_servers (name, host, port, username, password, use_tls, use_ssl, 
                                      max_per_hour, is_default, imap_host, imap_port, save_to_sent,
                                      pop3_host, pop3_port, pop3_ssl, pop3_leave_on_server, 
-                                     incoming_protocol, user_id, provider_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (name, host, port, username, password, 1 if use_tls else 0, 1 if use_ssl else 0, 
+                                     incoming_protocol, user_id, provider_type, oauth_token, oauth_refresh_token)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (name, host, port, username, encrypted_password, 1 if use_tls else 0, 1 if use_ssl else 0, 
               max_per_hour, is_default, imap_host, imap_port, 1 if save_to_sent else 0,
               pop3_host, pop3_port, 1 if pop3_ssl else 0, 1 if pop3_leave_on_server else 0, 
-              incoming_protocol, user_id, final_provider_type))
+              incoming_protocol, user_id, final_provider_type, encrypted_oauth, encrypted_refresh))
         conn.commit()
         return cursor.lastrowid
     
@@ -1098,12 +1107,25 @@ class DatabaseManager:
         """, (1 if is_verified else 0, verification_status, lead_id))
         conn.commit()
     
-    def get_scraping_jobs(self) -> List[Dict]:
+    def get_scraping_jobs(self, user_id: int = None) -> List[Dict]:
         """Get all scraping jobs"""
         conn = self.connect()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM lead_scraping_jobs ORDER BY created_at DESC")
+        
+        if user_id:
+            cursor.execute("SELECT * FROM lead_scraping_jobs WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
+        else:
+            cursor.execute("SELECT * FROM lead_scraping_jobs ORDER BY created_at DESC")
+        
         return [dict(row) for row in cursor.fetchall()]
+    
+    def get_lead_by_id(self, lead_id: int) -> Optional[Dict]:
+        """Get a lead by ID"""
+        conn = self.connect()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM leads WHERE id = ?", (lead_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
     
     def get_email_responses(self, hot_leads_only: bool = False) -> List[Dict]:
         """Get email responses"""

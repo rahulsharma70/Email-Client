@@ -97,3 +97,4 @@ Everything is controlled from the **Settings** page:
 
 No manual file editing needed! 🎉
 
+

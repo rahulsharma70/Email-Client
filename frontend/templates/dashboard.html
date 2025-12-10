@@ -255,9 +255,21 @@ async function handleEmailControl(action) {
     }
 }
 
-// Load stats on page load
-loadDashboardStats();
-loadSenderStatus();
+// Load stats on page load - ensure token is set first
+(async function() {
+    // Wait for auth to initialize
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Ensure token is in axios headers
+    const token = localStorage.getItem('jwt_token') || sessionStorage.getItem('jwt_token');
+    if (token && typeof axios !== 'undefined') {
+        axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    }
+    
+    // Now load stats
+    loadDashboardStats();
+    loadSenderStatus();
+})();
 
 // Auto-refresh every 5 seconds
 setInterval(loadDashboardStats, 5000);
