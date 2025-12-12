@@ -30,16 +30,33 @@ class ObservabilityManager:
     def record_metric(self, user_id: int, metric_type: str, metric_name: str, 
                      value: float, data: Dict = None):
         """Record a metric"""
-        conn = self.db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         
         metric_data = json.dumps(data) if data else None
         
-        cursor.execute("""
-            INSERT INTO metrics (user_id, metric_type, metric_name, metric_value, metric_data)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, metric_type, metric_name, value, metric_data))
-        conn.commit()
+        if use_supabase:
+            # Use Supabase table methods
+            try:
+                self.db.supabase.client.table('metrics').insert({
+                    'user_id': user_id,
+                    'metric_type': metric_type,
+                    'metric_name': metric_name,
+                    'metric_value': value,
+                    'metric_data': metric_data
+                }).execute()
+            except Exception as e:
+                print(f"Error recording metric to Supabase: {e}")
+                # Silently fail - metrics are not critical
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO metrics (user_id, metric_type, metric_name, metric_value, metric_data)
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_id, metric_type, metric_name, value, metric_data))
+            conn.commit()
     
     def get_queue_depth(self, user_id: int = None) -> Dict:
         """Get current email queue depth"""

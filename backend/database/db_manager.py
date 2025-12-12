@@ -267,7 +267,7 @@ class DatabaseManager:
             )
         """)
         
-        # Tracking table
+        # Tracking table (legacy - kept for compatibility)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS tracking (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -285,6 +285,35 @@ class DatabaseManager:
             )
         """)
         
+        # Email tracking table (for bounce, open, click tracking)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS email_tracking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                campaign_id INTEGER,
+                recipient_id INTEGER,
+                email_address TEXT NOT NULL,
+                event_type TEXT DEFAULT 'sent',
+                sent_at TIMESTAMP,
+                opened_at TIMESTAMP,
+                clicked_at TIMESTAMP,
+                bounced INTEGER DEFAULT 0,
+                unsubscribed INTEGER DEFAULT 0,
+                bounce_type TEXT,
+                bounce_reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (campaign_id) REFERENCES campaigns(id),
+                FOREIGN KEY (recipient_id) REFERENCES recipients(id)
+            )
+        """)
+        
+        # Add user_id to tracking table if it doesn't exist
+        try:
+            cursor.execute("ALTER TABLE tracking ADD COLUMN user_id INTEGER")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
         # Blacklist table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS blacklist (
@@ -295,11 +324,12 @@ class DatabaseManager:
             )
         """)
         
-        # Daily Stats table
+        # Daily Stats table (with user_id for multi-tenant)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS daily_stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date DATE UNIQUE,
+                user_id INTEGER,
+                date DATE NOT NULL,
                 emails_sent INTEGER DEFAULT 0,
                 emails_delivered INTEGER DEFAULT 0,
                 emails_bounced INTEGER DEFAULT 0,
@@ -307,9 +337,17 @@ class DatabaseManager:
                 emails_clicked INTEGER DEFAULT 0,
                 spam_reports INTEGER DEFAULT 0,
                 unsubscribes INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                UNIQUE(user_id, date)
             )
         """)
+        
+        # Add user_id column if table exists without it
+        try:
+            cursor.execute("ALTER TABLE daily_stats ADD COLUMN user_id INTEGER")
+        except sqlite3.OperationalError:
+            pass  # Column already exists or table doesn't exist yet
         
         # Sent Emails table - stores all sent emails for tracking
         cursor.execute("""
@@ -399,6 +437,7 @@ class DatabaseManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
                 icp_description TEXT NOT NULL,
+                lead_type TEXT DEFAULT 'B2B',
                 status TEXT DEFAULT 'pending',
                 companies_found INTEGER DEFAULT 0,
                 leads_found INTEGER DEFAULT 0,
@@ -410,6 +449,12 @@ class DatabaseManager:
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
+        
+        # Add lead_type column if it doesn't exist
+        try:
+            cursor.execute("ALTER TABLE lead_scraping_jobs ADD COLUMN lead_type TEXT DEFAULT 'B2B'")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         
         # Add new columns if they don't exist
         try:
@@ -682,32 +727,112 @@ class DatabaseManager:
         return [dict(row) for row in cursor.fetchall()]
     
     def add_recipients(self, recipients: List[Dict], user_id: int = None) -> int:
-        """Add recipients (handles duplicates)"""
+        """Add recipients with proper deduplication - only fills NULL/empty values"""
         conn = self.connect()
         cursor = conn.cursor()
         count = 0
+        updated_count = 0
+        skipped = 0
+        
         for recipient in recipients:
             try:
                 email = recipient.get('email', '').lower().strip()
+                if not email:
+                    continue
+                
+                # Check if recipient already exists (deduplication by email + user_id)
                 cursor.execute("""
-                    INSERT INTO recipients (email, first_name, last_name, company, city, phone, list_name, user_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    SELECT id, first_name, last_name, company, city, phone, list_name 
+                    FROM recipients WHERE email = ? AND user_id = ?
+                """, (email, user_id))
+                existing = cursor.fetchone()
+                
+                if existing:
+                    # Update existing recipient - only fill NULL/empty values, don't overwrite existing
+                    existing_id = existing[0]
+                    existing_first_name = existing[1] or ''
+                    existing_last_name = existing[2] or ''
+                    existing_company = existing[3] or ''
+                    existing_city = existing[4] or ''
+                    existing_phone = existing[5] or ''
+                    existing_list_name = existing[6] or 'default'
+                    
+                    # Build update - only set fields where new value exists and existing is NULL/empty
+                    updates = []
+                    params = []
+                    
+                    new_first_name = recipient.get('first_name', '').strip() if recipient.get('first_name') else ''
+                    if new_first_name and not existing_first_name:
+                        updates.append("first_name = ?")
+                        params.append(new_first_name)
+                    
+                    new_last_name = recipient.get('last_name', '').strip() if recipient.get('last_name') else ''
+                    if new_last_name and not existing_last_name:
+                        updates.append("last_name = ?")
+                        params.append(new_last_name)
+                    
+                    new_company = (recipient.get('company', '') or recipient.get('company_name', '')).strip()
+                    if new_company and not existing_company:
+                        updates.append("company = ?")
+                        params.append(new_company)
+                    
+                    new_city = recipient.get('city', '').strip() if recipient.get('city') else ''
+                    if new_city and not existing_city:
+                        updates.append("city = ?")
+                        params.append(new_city)
+                    
+                    new_phone = recipient.get('phone', '').strip() if recipient.get('phone') else ''
+                    if new_phone and not existing_phone:
+                        updates.append("phone = ?")
+                        params.append(new_phone)
+                    
+                    new_list_name = recipient.get('list_name', 'default').strip()
+                    if new_list_name and new_list_name != 'default' and (not existing_list_name or existing_list_name == 'default'):
+                        updates.append("list_name = ?")
+                        params.append(new_list_name)
+                    
+                    # Only update if there are fields to update
+                    if updates:
+                        params.append(existing_id)
+                        cursor.execute(f"""
+                            UPDATE recipients 
+                            SET {', '.join(updates)}
+                            WHERE id = ?
+                        """, params)
+                        updated_count += 1
+                    else:
+                        skipped += 1
+                    continue
+                
+                # Insert new recipient
+                cursor.execute("""
+                    INSERT INTO recipients (email, first_name, last_name, company, city, phone, list_name, user_id, is_verified, is_unsubscribed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     email,
                     recipient.get('first_name', ''),
                     recipient.get('last_name', ''),
-                    recipient.get('company', ''),
+                    recipient.get('company', '') or recipient.get('company_name', ''),
                     recipient.get('city', ''),
                     recipient.get('phone', ''),
                     recipient.get('list_name', 'default'),
-                    user_id
+                    user_id,
+                    recipient.get('is_verified', 0),
+                    0   # is_unsubscribed
                 ))
                 count += 1
             except sqlite3.IntegrityError:
                 # Duplicate email, skip
+                skipped += 1
                 continue
+            except Exception as e:
+                print(f"Error adding recipient {recipient.get('email', 'unknown')}: {e}")
+                skipped += 1
+                continue
+        
         conn.commit()
-        return count
+        print(f"Added {count} new recipients, updated {updated_count} existing recipients, skipped {skipped} duplicates")
+        return count + updated_count
     
     def get_recipients(self, list_name: str = None, unsubscribed_only: bool = False, user_id: int = None) -> List[Dict]:
         """Get recipients"""
@@ -1073,39 +1198,69 @@ class DatabaseManager:
     
     def add_lead(self, name: str, company_name: str, domain: str, email: str, 
                  title: str = None, source: str = 'manual', user_id: int = None) -> int:
-        """Add a single lead with deduplication"""
+        """Add a single lead with deduplication (removes duplicate unverified leads)"""
         conn = self.connect()
         cursor = conn.cursor()
         email_lower = email.lower().strip()
+        if not email_lower:
+            return None
         
         try:
-            # Check if lead exists
+            # Check if lead exists (get all with same email)
             if user_id:
                 cursor.execute("""
-                    SELECT id, follow_up_count FROM leads 
+                    SELECT id, is_verified, follow_up_count FROM leads 
                     WHERE email = ? AND user_id = ?
+                    ORDER BY is_verified DESC, id ASC
                 """, (email_lower, user_id))
             else:
                 cursor.execute("""
-                    SELECT id, follow_up_count FROM leads 
+                    SELECT id, is_verified, follow_up_count FROM leads 
                     WHERE email = ?
+                    ORDER BY is_verified DESC, id ASC
                 """, (email_lower,))
             
-            existing = cursor.fetchone()
+            existing_leads = cursor.fetchall()
             
-            if existing:
-                # Update existing lead
-                follow_up_count = (existing[1] or 0) + 1
+            # Separate verified and unverified
+            verified_leads = [l for l in existing_leads if l[1] == 1]
+            unverified_leads = [l for l in existing_leads if l[1] == 0]
+            
+            if verified_leads:
+                # If verified lead exists, update it (don't create duplicate)
+                lead_id = verified_leads[0][0]
+                cursor.execute("""
+                    UPDATE leads 
+                    SET name = ?, company_name = ?, domain = ?, title = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (name, company_name, domain, title, lead_id))
+                conn.commit()
+                return lead_id
+            
+            if unverified_leads:
+                # Remove duplicate unverified leads (keep only the first one)
+                if len(unverified_leads) > 1:
+                    ids_to_delete = [l[0] for l in unverified_leads[1:]]
+                    placeholders = ','.join(['?'] * len(ids_to_delete))
+                    cursor.execute(f"""
+                        DELETE FROM leads WHERE id IN ({placeholders})
+                    """, ids_to_delete)
+                    print(f"Removed {len(ids_to_delete)} duplicate unverified leads for {email_lower}")
+                
+                # Update the remaining unverified lead
+                lead_id = unverified_leads[0][0]
+                follow_up_count = (unverified_leads[0][2] or 0) + 1
                 cursor.execute("""
                     UPDATE leads 
                     SET name = ?, company_name = ?, domain = ?, title = ?, 
                         follow_up_count = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                """, (name, company_name, domain, title, follow_up_count, existing[0]))
+                """, (name, company_name, domain, title, follow_up_count, lead_id))
                 conn.commit()
-                return existing[0]
+                return lead_id
             
-            # Insert new lead
+            # Insert new lead (no duplicates found)
             cursor.execute("""
                 INSERT INTO leads (name, company_name, domain, email, title, source, user_id, follow_up_count)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 0)
@@ -1113,7 +1268,7 @@ class DatabaseManager:
             conn.commit()
             return cursor.lastrowid
         except sqlite3.IntegrityError:
-            # Handle unique constraint violation
+            # Handle unique constraint violation - try to find and return existing
             if user_id:
                 cursor.execute("SELECT id FROM leads WHERE email = ? AND user_id = ?", (email_lower, user_id))
             else:

@@ -34,9 +34,46 @@ CREATE TABLE IF NOT EXISTS users (
     stripe_customer_id TEXT,
     stripe_subscription_id TEXT,
     subscription_status TEXT DEFAULT 'active',
+    email_verified INTEGER DEFAULT 0,
+    email_verification_token TEXT,
+    email_verification_sent_at TIMESTAMP,
+    one_time_password TEXT,
+    account_activated_at TIMESTAMP,
+    onboarding_completed INTEGER DEFAULT 0,
+    onboarding_step INTEGER DEFAULT 0,
+    onboarding_data TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
+
+-- Add email verification and onboarding columns if they don't exist (for existing tables)
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='email_verified') THEN
+        ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='email_verification_token') THEN
+        ALTER TABLE users ADD COLUMN email_verification_token TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='email_verification_sent_at') THEN
+        ALTER TABLE users ADD COLUMN email_verification_sent_at TIMESTAMP;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='one_time_password') THEN
+        ALTER TABLE users ADD COLUMN one_time_password TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='account_activated_at') THEN
+        ALTER TABLE users ADD COLUMN account_activated_at TIMESTAMP;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='onboarding_completed') THEN
+        ALTER TABLE users ADD COLUMN onboarding_completed INTEGER DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='onboarding_step') THEN
+        ALTER TABLE users ADD COLUMN onboarding_step INTEGER DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='onboarding_data') THEN
+        ALTER TABLE users ADD COLUMN onboarding_data TEXT;
+    END IF;
+END $$;
 
 -- Leads
 CREATE TABLE IF NOT EXISTS leads (
@@ -176,16 +213,37 @@ CREATE TABLE IF NOT EXISTS sent_emails (
 -- Email tracking (opens, clicks, bounces, unsubscribes)
 CREATE TABLE IF NOT EXISTS email_tracking (
     id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
     campaign_id BIGINT REFERENCES campaigns(id) ON DELETE CASCADE,
     recipient_id BIGINT REFERENCES recipients(id) ON DELETE CASCADE,
     email_address TEXT NOT NULL,
+    event_type TEXT DEFAULT 'sent',
     sent_at TIMESTAMP,
     opened_at TIMESTAMP,
     clicked_at TIMESTAMP,
     bounced INTEGER DEFAULT 0,
     unsubscribed INTEGER DEFAULT 0,
+    bounce_type TEXT,
+    bounce_reason TEXT,
     created_at TIMESTAMP DEFAULT NOW()
 );
+
+-- Add user_id and event_type columns if they don't exist (for existing tables)
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='email_tracking' AND column_name='user_id') THEN
+        ALTER TABLE email_tracking ADD COLUMN user_id BIGINT REFERENCES users(id) ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='email_tracking' AND column_name='event_type') THEN
+        ALTER TABLE email_tracking ADD COLUMN event_type TEXT DEFAULT 'sent';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='email_tracking' AND column_name='bounce_type') THEN
+        ALTER TABLE email_tracking ADD COLUMN bounce_type TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='email_tracking' AND column_name='bounce_reason') THEN
+        ALTER TABLE email_tracking ADD COLUMN bounce_reason TEXT;
+    END IF;
+END $$;
 
 -- Email responses (missing previously; added to support indexes)
 CREATE TABLE IF NOT EXISTS email_responses (
@@ -193,11 +251,15 @@ CREATE TABLE IF NOT EXISTS email_responses (
     user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
     campaign_id BIGINT REFERENCES campaigns(id) ON DELETE SET NULL,
     recipient_id BIGINT REFERENCES recipients(id) ON DELETE SET NULL,
+    sent_email_id BIGINT REFERENCES sent_emails(id) ON DELETE CASCADE,
     recipient_email TEXT,
     subject TEXT,
     body TEXT,
+    response_content TEXT,
+    response_type TEXT DEFAULT 'reply',
     received_at TIMESTAMP,
     is_reply INTEGER DEFAULT 0,
+    is_hot_lead INTEGER DEFAULT 0,
     follow_up_needed INTEGER DEFAULT 0,
     follow_up_date DATE,
     created_at TIMESTAMP DEFAULT NOW()
@@ -208,6 +270,7 @@ CREATE TABLE IF NOT EXISTS lead_scraping_jobs (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
     icp_description TEXT NOT NULL,
+    lead_type TEXT DEFAULT 'B2B',
     status TEXT DEFAULT 'pending',
     companies_found INTEGER DEFAULT 0,
     leads_found INTEGER DEFAULT 0,
@@ -217,6 +280,14 @@ CREATE TABLE IF NOT EXISTS lead_scraping_jobs (
     created_at TIMESTAMP DEFAULT NOW(),
     completed_at TIMESTAMP
 );
+
+-- Add lead_type column if it doesn't exist (for existing tables)
+DO $$ 
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='lead_scraping_jobs' AND column_name='lead_type') THEN
+        ALTER TABLE lead_scraping_jobs ADD COLUMN lead_type TEXT DEFAULT 'B2B';
+    END IF;
+END $$;
 
 -- App settings
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -277,6 +348,44 @@ CREATE TABLE IF NOT EXISTS alerts (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Domains table for DNS verification and domain rotation
+CREATE TABLE IF NOT EXISTS domains (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    domain TEXT NOT NULL,
+    spf_verified INTEGER DEFAULT 0,
+    dkim_verified INTEGER DEFAULT 0,
+    dmarc_verified INTEGER DEFAULT 0,
+    dkim_public_key TEXT,
+    dkim_private_key TEXT,
+    dkim_selector TEXT,
+    verification_status TEXT DEFAULT 'pending',
+    reputation_score REAL DEFAULT 0.0,
+    reputation_status TEXT DEFAULT 'neutral',
+    reputation_updated_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(user_id, domain)
+);
+
+-- Banned domains table for abuse prevention
+CREATE TABLE IF NOT EXISTS banned_domains (
+    id BIGSERIAL PRIMARY KEY,
+    domain TEXT NOT NULL UNIQUE,
+    reason TEXT,
+    banned_at TIMESTAMP DEFAULT NOW()
+);
+
+-- User fingerprints table for abuse detection
+CREATE TABLE IF NOT EXISTS user_fingerprints (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    ip_address TEXT,
+    user_agent TEXT,
+    browser_fingerprint TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_leads_user_id ON leads(user_id);
 CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email);
@@ -287,10 +396,43 @@ CREATE INDEX IF NOT EXISTS idx_email_queue_status ON email_queue(status);
 CREATE INDEX IF NOT EXISTS idx_sent_emails_campaign_id ON sent_emails(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_sent_emails_recipient_id ON sent_emails(recipient_id);
 CREATE INDEX IF NOT EXISTS idx_sent_emails_sent_at ON sent_emails(sent_at);
+CREATE INDEX IF NOT EXISTS idx_domains_user_id ON domains(user_id);
+CREATE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain);
+CREATE INDEX IF NOT EXISTS idx_banned_domains_domain ON banned_domains(domain);
+CREATE INDEX IF NOT EXISTS idx_user_fingerprints_user_id ON user_fingerprints(user_id);
+
+-- Add missing columns to email_responses if they don't exist
+DO $$ 
+BEGIN
+    -- Add sent_email_id if it doesn't exist
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'email_responses' AND column_name = 'sent_email_id') THEN
+        ALTER TABLE email_responses ADD COLUMN sent_email_id BIGINT REFERENCES sent_emails(id) ON DELETE CASCADE;
+    END IF;
+    
+    -- Add response_content if it doesn't exist
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'email_responses' AND column_name = 'response_content') THEN
+        ALTER TABLE email_responses ADD COLUMN response_content TEXT;
+    END IF;
+    
+    -- Add response_type if it doesn't exist
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'email_responses' AND column_name = 'response_type') THEN
+        ALTER TABLE email_responses ADD COLUMN response_type TEXT DEFAULT 'reply';
+    END IF;
+    
+    -- Add is_hot_lead if it doesn't exist
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'email_responses' AND column_name = 'is_hot_lead') THEN
+        ALTER TABLE email_responses ADD COLUMN is_hot_lead INTEGER DEFAULT 0;
+    END IF;
+END $$;
 
 -- Indexes that reference email_responses (now present)
 CREATE INDEX IF NOT EXISTS idx_email_responses_recipient ON email_responses(recipient_email);
 CREATE INDEX IF NOT EXISTS idx_email_responses_followup ON email_responses(follow_up_needed, follow_up_date);
+CREATE INDEX IF NOT EXISTS idx_email_responses_hot_lead ON email_responses(is_hot_lead) WHERE is_hot_lead = 1;
 
 CREATE INDEX IF NOT EXISTS idx_settings_user_key ON app_settings(user_id, setting_key);
 

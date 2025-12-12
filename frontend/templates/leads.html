@@ -69,9 +69,20 @@
         <h2>Scrape Leads from ICP</h2>
         <form id="scraperForm">
             <div class="form-group">
+                <label>Lead Type *</label>
+                <select id="leadType" name="lead_type" required style="width: 100%; padding: 10px; margin-bottom: 10px;">
+                    <option value="B2B">B2B (Companies → Decision Makers)</option>
+                    <option value="B2C">B2C (Individual People)</option>
+                </select>
+                <small style="color: #7f8c8d; display: block; margin-top: 5px;">
+                    <strong>B2B:</strong> Find companies first, then decision makers (CEOs, VPs, Directors) in those companies<br>
+                    <strong>B2C:</strong> Find individual people directly (students, engineers, freelancers, professionals)
+                </small>
+            </div>
+            <div class="form-group">
                 <label>ICP Description *</label>
-                <textarea id="icpDescription" rows="8" required 
-                          placeholder="Describe your Ideal Customer Profile. For example: 'B2B SaaS companies with 50-200 employees in the marketing technology space, based in North America, using CRM tools...'"></textarea>
+                <textarea id="icpDescription" name="icp_description" rows="8" required 
+                          placeholder="Describe your Ideal Customer Profile.&#10;&#10;For B2B: 'SaaS companies with 50-200 employees in the marketing technology space, based in North America...'&#10;&#10;For B2C: 'Software engineers working in tech companies, based in San Francisco, with 3-5 years experience...'"></textarea>
             </div>
             <div class="form-group">
                 <button type="submit" class="btn btn-primary">
@@ -422,7 +433,11 @@ document.getElementById('scraperForm').addEventListener('submit', function(e) {
     statusDiv.innerHTML = '<div style="color: #3498db;"><i class="fas fa-spinner fa-spin"></i> Starting scraping job...</div>';
     progressSection.style.display = 'none';
     
-    axios.post('/api/leads/scrape', { icp_description: icpDescription })
+    const leadType = document.getElementById('leadType').value;
+    axios.post('/api/leads/scrape', { 
+        icp_description: icpDescription,
+        lead_type: leadType
+    })
         .then(response => {
             if (response.data.success) {
                 // Get job ID from response

@@ -19,8 +19,13 @@ class SupabaseDatabaseManager:
         self.initialize_database()
     
     def connect(self):
-        """Get Supabase client (for compatibility)"""
-        return self.supabase.client
+        """Get database connection (for compatibility with SQLite code)"""
+        # Return a compatibility wrapper that provides cursor-like interface
+        return self
+    
+    def cursor(self):
+        """Get cursor (for compatibility) - returns self for method chaining"""
+        return self
     
     def initialize_database(self):
         """Initialize database schema (run migrations)"""
@@ -47,6 +52,44 @@ class SupabaseDatabaseManager:
             # Return True to allow app to continue
             return True
     
+    def _check_table_exists(self, table_name: str) -> bool:
+        """Check if a table exists in Supabase"""
+        try:
+            # Try a simple select query - if table doesn't exist, it will raise an error
+            self.supabase.client.table(table_name).select('id').limit(1).execute()
+            return True
+        except Exception as e:
+            error_msg = str(e)
+            if 'PGRST205' in error_msg or 'Could not find the table' in error_msg:
+                return False
+            # Other errors might mean table exists but has no data or permission issue
+            return True
+    
+    def _ensure_table_exists(self, table_name: str, operation: str = "operation"):
+        """Ensure table exists, raise helpful error if not"""
+        if not self._check_table_exists(table_name):
+            error_msg = f"""
+❌ ERROR: Table '{table_name}' does not exist in Supabase!
+
+To fix this:
+1. Open your Supabase Dashboard
+2. Go to SQL Editor
+3. Copy and paste the contents of supabase_migration.sql
+4. Run the migration script
+5. Wait a few seconds for PostgREST to refresh its schema cache
+
+The migration script will create all required tables including:
+- campaigns
+- email_queue
+- recipients
+- smtp_servers
+- sent_emails
+- And all other tables
+
+After running the migration, try your {operation} again.
+"""
+            raise Exception(error_msg)
+    
     # User methods
     def get_user(self, user_id: int) -> Optional[Dict]:
         """Get user by ID"""
@@ -59,6 +102,9 @@ class SupabaseDatabaseManager:
                        template_id: int = None, use_personalization: bool = False,
                        user_id: int = None, personalization_prompt: str = None) -> int:
         """Create a new email campaign"""
+        # Ensure campaigns table exists
+        self._ensure_table_exists('campaigns', 'campaign creation')
+        
         data = {
             'name': name,
             'subject': subject,
@@ -83,19 +129,44 @@ class SupabaseDatabaseManager:
     # Lead methods
     def add_lead(self, name: str, company_name: str, domain: str, email: str,
                  title: str = None, source: str = 'manual', user_id: int = None) -> int:
-        """Add a single lead with deduplication"""
+        """Add a single lead with deduplication (removes duplicate unverified leads)"""
         email_lower = email.lower().strip()
+        if not email_lower:
+            return None
         
         # Check if lead exists
-        filters = {'email': email_lower}
-        if user_id:
-            filters['user_id'] = user_id
+        existing_result = self.supabase.client.table('leads').select('*').eq('email', email_lower).eq('user_id', user_id).execute()
+        existing_leads = existing_result.data if existing_result.data else []
         
-        existing = self.supabase.select('leads', filters=filters, limit=1)
+        # Filter: Keep verified leads, remove duplicate unverified leads
+        verified_leads = [l for l in existing_leads if l.get('is_verified', 0) == 1]
+        unverified_leads = [l for l in existing_leads if l.get('is_verified', 0) == 0]
         
-        if existing:
-            # Update existing lead
-            lead = existing[0]
+        if verified_leads:
+            # If verified lead exists, update it (don't create duplicate)
+            lead = verified_leads[0]
+            self.supabase.client.table('leads').update({
+                'name': name,
+                'company_name': company_name,
+                'domain': domain,
+                'title': title
+            }).eq('id', lead['id']).execute()
+            return lead['id']
+        
+        if unverified_leads:
+            # Remove duplicate unverified leads (keep only the first one)
+            if len(unverified_leads) > 1:
+                # Delete all but the first
+                ids_to_delete = [l['id'] for l in unverified_leads[1:]]
+                for lead_id in ids_to_delete:
+                    try:
+                        self.supabase.client.table('leads').delete().eq('id', lead_id).execute()
+                    except:
+                        pass
+                print(f"Removed {len(ids_to_delete)} duplicate unverified leads for {email_lower}")
+            
+            # Update the remaining unverified lead
+            lead = unverified_leads[0]
             follow_up_count = (lead.get('follow_up_count') or 0) + 1
             self.supabase.client.table('leads').update({
                 'name': name,
@@ -106,7 +177,7 @@ class SupabaseDatabaseManager:
             }).eq('id', lead['id']).execute()
             return lead['id']
         
-        # Insert new lead
+        # Insert new lead (no duplicates found)
         data = {
             'name': name,
             'company_name': company_name,
@@ -130,9 +201,9 @@ class SupabaseDatabaseManager:
             query = self.supabase.client.table('leads').select('*')
             
             # Apply filters using .eq() after .select()
-        if user_id:
+            if user_id:
                 query = query.eq('user_id', user_id)
-        if verified_only:
+            if verified_only:
                 query = query.eq('is_verified', 1)
             
             # Order by created_at desc
@@ -142,8 +213,12 @@ class SupabaseDatabaseManager:
             result = query.execute()
             leads = result.data if result.data else []
             
+            # Ensure leads is a list (handle None case)
+            if leads is None:
+                leads = []
+            
             # Filter by company_name in Python if needed
-        if company_name:
+            if company_name:
                 leads = [l for l in leads if company_name.lower() in (l.get('company_name') or '').lower()]
             
             return leads
@@ -175,42 +250,113 @@ class SupabaseDatabaseManager:
     
     # Recipient methods
     def add_recipients(self, recipients: List[Dict], user_id: int = None) -> int:
-        """Add recipients"""
+        """Add recipients with proper deduplication - only fills NULL/empty values"""
         count = 0
+        updated_count = 0
+        skipped = 0
+        
         for recipient in recipients:
             try:
                 email = recipient.get('email', '').lower().strip()
+                if not email:
+                    continue
+                
+                # Check if recipient already exists (deduplication by email + user_id)
+                existing_result = self.supabase.client.table('recipients').select('*').eq('email', email).eq('user_id', user_id).execute()
+                
+                if existing_result.data and len(existing_result.data) > 0:
+                    # Update existing recipient - only fill NULL/empty values, don't overwrite existing
+                    existing = existing_result.data[0]
+                    existing_id = existing['id']
+                    
+                    # Build update dict - only include fields that are not NULL/empty in new data
+                    # and the existing field is NULL/empty
+                    update_data = {}
+                    
+                    new_first_name = recipient.get('first_name', '').strip() if recipient.get('first_name') else None
+                    if new_first_name and (not existing.get('first_name') or existing.get('first_name') == ''):
+                        update_data['first_name'] = new_first_name
+                    
+                    new_last_name = recipient.get('last_name', '').strip() if recipient.get('last_name') else None
+                    if new_last_name and (not existing.get('last_name') or existing.get('last_name') == ''):
+                        update_data['last_name'] = new_last_name
+                    
+                    new_company = (recipient.get('company', '') or recipient.get('company_name', '')).strip()
+                    if new_company and (not existing.get('company') or existing.get('company') == ''):
+                        update_data['company'] = new_company
+                    
+                    new_city = recipient.get('city', '').strip() if recipient.get('city') else None
+                    if new_city and (not existing.get('city') or existing.get('city') == ''):
+                        update_data['city'] = new_city
+                    
+                    new_phone = recipient.get('phone', '').strip() if recipient.get('phone') else None
+                    if new_phone and (not existing.get('phone') or existing.get('phone') == ''):
+                        update_data['phone'] = new_phone
+                    
+                    new_list_name = recipient.get('list_name', 'default').strip()
+                    if new_list_name and new_list_name != 'default' and (not existing.get('list_name') or existing.get('list_name') == 'default'):
+                        update_data['list_name'] = new_list_name
+                    
+                    # Only update if there are fields to update
+                    if update_data:
+                        self.supabase.client.table('recipients').update(update_data).eq('id', existing_id).execute()
+                        updated_count += 1
+                    else:
+                        skipped += 1
+                    continue
+                
+                # Insert new recipient
                 data = {
                     'email': email,
                     'first_name': recipient.get('first_name', ''),
                     'last_name': recipient.get('last_name', ''),
-                    'company': recipient.get('company', ''),
+                    'company': recipient.get('company', '') or recipient.get('company_name', ''),
                     'city': recipient.get('city', ''),
                     'phone': recipient.get('phone', ''),
                     'list_name': recipient.get('list_name', 'default'),
                     'user_id': user_id,
-                    'is_verified': 0,
+                    'is_verified': recipient.get('is_verified', 0),
                     'is_unsubscribed': 0
                 }
-                result = self.supabase.client.table('recipients').insert(data).execute()   
-                count += 1
+                result = self.supabase.client.table('recipients').insert(data).execute()
+                if result.data:
+                    count += 1
             except Exception as e:
                 # Duplicate or error, skip
+                print(f"Error adding recipient {recipient.get('email', 'unknown')}: {e}")
+                skipped += 1
                 continue
-        return count
+        
+        print(f"Added {count} new recipients, updated {updated_count} existing recipients, skipped {skipped} duplicates")
+        return count + updated_count
     
     def get_recipients(self, list_name: str = None, unsubscribed_only: bool = False,
                       user_id: int = None) -> List[Dict]:
         """Get recipients"""
-        filters = {}
-        if user_id:
-            filters['user_id'] = user_id
-        if list_name:
-            filters['list_name'] = list_name
-        if not unsubscribed_only:
-            filters['is_unsubscribed'] = 0
-        
-        return self.supabase.select('recipients', filters=filters, order_by='created_at.desc')
+        try:
+            query = self.supabase.client.table('recipients').select('*')
+            
+            if user_id:
+                query = query.eq('user_id', user_id)
+            if list_name:
+                query = query.eq('list_name', list_name)
+            if not unsubscribed_only:
+                query = query.eq('is_unsubscribed', 0)
+            
+            query = query.order('created_at', desc=True)
+            result = query.execute()
+            
+            # Ensure result is a list (handle None case)
+            recipients = result.data if result.data else []
+            if recipients is None:
+                recipients = []
+            
+            return recipients
+        except Exception as e:
+            print(f"Error getting recipients from Supabase: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
     
     # SMTP methods
     def add_smtp_server(self, name: str, host: str, port: int, username: str,
@@ -368,15 +514,93 @@ class SupabaseDatabaseManager:
         self.supabase.client.table('smtp_servers').update(data).eq('id', server_id).execute()
     
     # Email queue methods
-    def add_to_queue(self, campaign_id: int, recipient_id: int, smtp_server_id: int):
-        """Add email to queue"""
-        data = {
-            'campaign_id': campaign_id,
-            'recipient_id': recipient_id,
-            'smtp_server_id': smtp_server_id,
-            'status': 'pending'
-        }
-        result = self.supabase.client.table('email_queue').insert(data).execute()   
+    def add_to_queue(self, campaign_id: int, recipient_ids: List[int], smtp_server_id: int = None, 
+                     emails_per_server: int = 20, selected_smtp_servers: List[int] = None) -> int:
+        """
+        Add emails to sending queue with round-robin SMTP distribution
+        
+        Args:
+            campaign_id: Campaign ID
+            recipient_ids: List of recipient IDs
+            smtp_server_id: Optional single SMTP server ID (if None, uses round-robin)
+            emails_per_server: Number of emails per SMTP server (default: 20)
+            selected_smtp_servers: Optional list of selected SMTP server IDs (if provided, uses only these)
+        
+        Returns:
+            Number of emails added to queue
+        """
+        added_count = 0
+        
+        # Get SMTP servers
+        if smtp_server_id:
+            smtp_servers = [smtp_server_id]
+        elif selected_smtp_servers and len(selected_smtp_servers) > 0:
+            # Get active servers from selection
+            result = self.supabase.client.table('smtp_servers').select('id').in_('id', selected_smtp_servers).eq('is_active', 1).execute()
+            smtp_servers = [s['id'] for s in (result.data or [])]
+            if not smtp_servers:
+                print("⚠ No active SMTP servers found from selection!")
+                return 0
+        else:
+            # Get all active SMTP servers
+            result = self.supabase.client.table('smtp_servers').select('id').eq('is_active', 1).execute()
+            smtp_servers = [s['id'] for s in (result.data or [])]
+            if not smtp_servers:
+                print("⚠ No active SMTP servers found!")
+                return 0
+        
+        # Calculate total emails to send
+        total_emails_to_send = emails_per_server * len(smtp_servers)
+        recipient_ids_to_process = recipient_ids[:total_emails_to_send]
+        
+        print(f"📧 Distributing {len(recipient_ids_to_process)} emails across {len(smtp_servers)} SMTP servers")
+        
+        # Get recipients to check unsubscribed status
+        recipient_result = self.supabase.client.table('recipients').select('id, is_unsubscribed').in_('id', recipient_ids_to_process).execute()
+        recipients_dict = {r['id']: r for r in (recipient_result.data or [])}
+        
+        # Distribute emails in round-robin fashion
+        for index, recipient_id in enumerate(recipient_ids_to_process):
+            try:
+                # Check if recipient is unsubscribed
+                recipient = recipients_dict.get(recipient_id)
+                if recipient and recipient.get('is_unsubscribed'):
+                    continue  # Skip unsubscribed
+                
+                # Check if already in queue
+                existing = self.supabase.client.table('email_queue').select('id').eq('campaign_id', campaign_id).eq('recipient_id', recipient_id).in_('status', ['pending', 'processing']).execute()
+                if existing.data and len(existing.data) > 0:
+                    continue  # Already queued
+                
+                # Add to campaign_recipients (many-to-many)
+                try:
+                    self.supabase.client.table('campaign_recipients').insert({
+                        'campaign_id': campaign_id,
+                        'recipient_id': recipient_id,
+                        'status': 'pending'
+                    }).execute()
+                except:
+                    pass  # Already exists, continue
+                
+                # Calculate which SMTP server to use (round-robin)
+                server_index = (index // emails_per_server) % len(smtp_servers)
+                assigned_smtp_id = smtp_servers[server_index]
+                
+                # Add to queue
+                self.supabase.client.table('email_queue').insert({
+                    'campaign_id': campaign_id,
+                    'recipient_id': recipient_id,
+                    'smtp_server_id': assigned_smtp_id,
+                    'status': 'pending'
+                }).execute()
+                
+                added_count += 1
+            except Exception as e:
+                print(f"Error adding recipient {recipient_id} to queue: {e}")
+                continue
+        
+        print(f"✅ Added {added_count} emails to queue for campaign {campaign_id}")
+        return added_count   
     
     def get_next_queue_item(self) -> Optional[Dict]:
         """Get next item from queue"""
@@ -423,10 +647,11 @@ class SupabaseDatabaseManager:
             return None
     
     # Lead scraping jobs methods
-    def create_scraping_job(self, icp_description: str, user_id: int = None) -> int:
+    def create_scraping_job(self, icp_description: str, user_id: int = None, lead_type: str = 'B2B') -> int:
         """Create a new scraping job"""
         data = {
             'icp_description': icp_description,
+            'lead_type': lead_type,
             'status': 'running',
             'user_id': user_id,
             'current_step': 'Starting...',
@@ -491,20 +716,63 @@ class SupabaseDatabaseManager:
     def get_email_responses(self, hot_leads_only: bool = False) -> List[Dict]:
         """Get email responses"""
         try:
+            # Select all columns, but handle case where is_hot_lead might not exist
             query = self.supabase.client.table('email_responses').select('*')
+            
+            # Only filter by is_hot_lead if the column exists and hot_leads_only is True
             if hot_leads_only:
-                query = query.eq('is_hot_lead', 1)
+                try:
+                    # Try to filter by is_hot_lead
+                    query = query.eq('is_hot_lead', 1)
+                except Exception as filter_error:
+                    # If column doesn't exist, log warning and return all responses
+                    # The migration should add this column, but handle gracefully
+                    print(f"⚠ Warning: is_hot_lead column may not exist. Filtering disabled: {filter_error}")
+                    # Continue without filtering - will return all responses
+            
             query = query.order('created_at', desc=True)
             result = query.execute()
             responses = result.data if result.data else []
             
+            # If hot_leads_only was requested but column doesn't exist, filter in Python
+            if hot_leads_only and responses:
+                # Check if any response has is_hot_lead field
+                has_hot_lead_column = any('is_hot_lead' in r for r in responses)
+                if not has_hot_lead_column:
+                    # Column doesn't exist - can't filter, return empty or all
+                    print("⚠ Warning: is_hot_lead column not found in responses. Cannot filter hot leads.")
+                    return []
+                else:
+                    # Filter in Python as fallback
+                    responses = [r for r in responses if r.get('is_hot_lead', 0) == 1]
+            
             # Enrich with sent_email data
             for response in responses:
-                if response.get('sent_email_id'):
-                    sent_email = self.supabase.client.table('sent_emails').select('subject,sent_at').eq('id', response['sent_email_id']).execute()
-                    if sent_email.data and len(sent_email.data) > 0:
-                        response['original_subject'] = sent_email.data[0].get('subject')
-                        response['sent_at'] = sent_email.data[0].get('sent_at')
+                # Try sent_email_id first, then fallback to campaign_id/recipient_id
+                sent_email_id = response.get('sent_email_id')
+                if sent_email_id:
+                    try:
+                        sent_email = self.supabase.client.table('sent_emails').select('subject,sent_at,recipient_email').eq('id', sent_email_id).execute()
+                        if sent_email.data and len(sent_email.data) > 0:
+                            response['original_subject'] = sent_email.data[0].get('subject')
+                            response['sent_at'] = sent_email.data[0].get('sent_at')
+                            if not response.get('recipient_email'):
+                                response['recipient_email'] = sent_email.data[0].get('recipient_email')
+                    except Exception as enrich_error:
+                        print(f"⚠ Could not enrich response with sent_email data: {enrich_error}")
+                
+                # Also try to get from campaign/recipient if sent_email_id not available
+                if not response.get('original_subject') and response.get('campaign_id'):
+                    try:
+                        campaign = self.supabase.client.table('campaigns').select('subject').eq('id', response['campaign_id']).execute()
+                        if campaign.data and len(campaign.data) > 0:
+                            response['original_subject'] = campaign.data[0].get('subject')
+                    except:
+                        pass
+                
+                # Ensure response_content exists (might be stored as 'body' in old schema)
+                if not response.get('response_content') and response.get('body'):
+                    response['response_content'] = response.get('body')
             
             return responses
         except Exception as e:
@@ -556,6 +824,133 @@ class SupabaseDatabaseManager:
             import traceback
             traceback.print_exc()
             return []
+    
+    # Settings methods
+    def get_setting(self, key: str, default: str = None) -> str:
+        """Get a setting value (global setting, no user_id)"""
+        try:
+            # Get all settings with this key (both global and user-specific)
+            result = self.supabase.client.table('app_settings').select('setting_value, user_id').eq('setting_key', key).execute()
+            if result.data:
+                # Filter for NULL user_id (global settings) in Python
+                for setting in result.data:
+                    if setting.get('user_id') is None or setting.get('user_id') == 'None':
+                        return setting.get('setting_value', default)
+            return default
+        except Exception as e:
+            print(f"Error getting setting from Supabase: {e}")
+            return default
+    
+    def set_setting(self, key: str, value: str):
+        """Set a setting value (global setting, no user_id)"""
+        try:
+            # Get all settings with this key and find the one with NULL user_id
+            result = self.supabase.client.table('app_settings').select('id, user_id').eq('setting_key', key).execute()
+            
+            # Find setting with NULL user_id
+            existing_id = None
+            if result.data:
+                for setting in result.data:
+                    if setting.get('user_id') is None:
+                        existing_id = setting['id']
+                        break
+            
+            if existing_id:
+                # Update existing
+                self.supabase.client.table('app_settings').update({
+                    'setting_value': str(value),
+                    'updated_at': datetime.now().isoformat()
+                }).eq('id', existing_id).execute()
+            else:
+                # Insert new (upsert with user_id = NULL)
+                # Use upsert to handle unique constraint
+                self.supabase.client.table('app_settings').upsert({
+                    'setting_key': key,
+                    'setting_value': str(value),
+                    'user_id': None,
+                    'updated_at': datetime.now().isoformat()
+                }, on_conflict='setting_key,user_id').execute()
+        except Exception as e:
+            print(f"Error setting setting in Supabase: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def get_email_delay(self) -> int:
+        """Get email delay setting in seconds"""
+        delay = self.get_setting('email_delay', '30')
+        try:
+            return int(delay)
+        except:
+            return 30
+    
+    def get_queue_stats(self) -> Dict:
+        """Get queue statistics"""
+        try:
+            # Get pending emails count
+            pending_result = self.supabase.client.table('email_queue').select('id', count='exact').eq('status', 'pending').execute()
+            pending = pending_result.count if pending_result.count else 0
+            
+            # Get sent today count (IST date)
+            from datetime import date, timedelta
+            today = date.today().isoformat()
+            tomorrow = (date.today() + timedelta(days=1)).isoformat()
+            sent_result = self.supabase.client.table('email_queue').select('id', count='exact').eq('status', 'sent').gte('sent_at', today).lt('sent_at', tomorrow).execute()
+            sent_today = sent_result.count if sent_result.count else 0
+            
+            return {
+                'pending': pending,
+                'sent_today': sent_today
+            }
+        except Exception as e:
+            print(f"Error getting queue stats from Supabase: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'pending': 0, 'sent_today': 0}
+    
+    def get_daily_stats(self, date: str = None) -> Dict:
+        """Get daily statistics"""
+        try:
+            from datetime import date as date_class
+            if not date:
+                date = date_class.today().isoformat()
+            
+            # Get stats for the date
+            result = self.supabase.client.table('daily_stats').select('*').eq('date', date).execute()
+            
+            if result.data and len(result.data) > 0:
+                stats = result.data[0]
+                return {
+                    'emails_sent': stats.get('emails_sent', 0) or 0,
+                    'emails_delivered': stats.get('emails_delivered', 0) or 0,
+                    'emails_bounced': stats.get('emails_bounced', 0) or 0,
+                    'emails_opened': stats.get('emails_opened', 0) or 0,
+                    'emails_clicked': stats.get('emails_clicked', 0) or 0,
+                    'spam_reports': stats.get('spam_reports', 0) or 0,
+                    'unsubscribes': stats.get('emails_unsubscribed', 0) or 0
+                }
+            else:
+                return {
+                    'emails_sent': 0,
+                    'emails_delivered': 0,
+                    'emails_bounced': 0,
+                    'emails_opened': 0,
+                    'emails_clicked': 0,
+                    'spam_reports': 0,
+                    'unsubscribes': 0
+                }
+        except Exception as e:
+            print(f"Error getting daily stats from Supabase: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'emails_sent': 0,
+                'emails_delivered': 0,
+                'emails_bounced': 0,
+                'emails_opened': 0,
+                'emails_clicked': 0,
+                'spam_reports': 0,
+                'unsubscribes': 0
+            }
     
     # Compatibility methods for existing code
     def execute(self, query: str, params: tuple = None):

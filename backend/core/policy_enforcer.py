@@ -162,16 +162,36 @@ class PolicyEnforcer:
             Dictionary with allowed status
         """
         try:
-            # Get user's domains
-            conn = self.db.connect()
-            cursor = conn.cursor()
+            # Check if using Supabase FIRST before trying to use SQLite methods
+            use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
             
-            if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
-                result = self.db.supabase.client.table('domains').select('domain').eq('user_id', user_id).execute()
-                domains = [d['domain'] for d in (result.data or [])]
+            # Get user's domains
+            domains = []
+            if use_supabase:
+                try:
+                    result = self.db.supabase.client.table('domains').select('domain').eq('user_id', user_id).execute()
+                    domains = [d['domain'] for d in (result.data or [])]
+                except Exception as table_error:
+                    # Table doesn't exist or error accessing it - skip domain rotation silently
+                    # This is expected if the domains table hasn't been created yet
+                    error_msg = str(table_error)
+                    if 'PGRST205' in error_msg or 'schema cache' in error_msg.lower():
+                        # Table doesn't exist - this is fine, domain rotation is optional
+                        pass
+                    else:
+                        # Other error - log it
+                        print(f"Domain rotation check failed: {table_error}")
+                    return {'allowed': True}
             else:
-                cursor.execute("SELECT domain FROM domains WHERE user_id = ?", (user_id,))
-                domains = [row[0] for row in cursor.fetchall()]
+                try:
+                    conn = self.db.connect()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT domain FROM domains WHERE user_id = ?", (user_id,))
+                    domains = [row[0] for row in cursor.fetchall()]
+                except Exception as table_error:
+                    # Table doesn't exist - skip domain rotation silently
+                    # This is expected if the domains table hasn't been created yet
+                    return {'allowed': True}
             
             # If user has multiple domains, enforce rotation
             if len(domains) > 1:
@@ -180,20 +200,36 @@ class PolicyEnforcer:
                 
                 domain_sends = {}
                 for d in domains:
-                    if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
-                        # Count sends for this domain today
-                        result = self.db.supabase.client.table('email_queue').select(
-                            'id', count='exact'
-                        ).eq('user_id', user_id).eq('status', 'sent').like('sender_email', f'%@{d}').gte('sent_at', today.isoformat()).execute()
-                        domain_sends[d] = result.count if result.count else 0
+                    if use_supabase:
+                        try:
+                            # Count sends for this domain today via campaigns
+                            # Note: email_queue might not have sender_email directly, so we check campaigns
+                            camp_result = self.db.supabase.client.table('campaigns').select('id, sender_email').eq('user_id', user_id).like('sender_email', f'%@{d}').execute()
+                            campaign_ids = [c['id'] for c in (camp_result.data or [])]
+                            
+                            if campaign_ids:
+                                # Count sent emails from these campaigns today
+                                queue_result = self.db.supabase.client.table('email_queue').select('id', count='exact').in_('campaign_id', campaign_ids).eq('status', 'sent').gte('sent_at', today.isoformat()).execute()
+                                domain_sends[d] = queue_result.count if queue_result.count else 0
+                            else:
+                                domain_sends[d] = 0
+                        except Exception as e:
+                            print(f"Error counting domain sends for {d}: {e}")
+                            domain_sends[d] = 0
                     else:
-                        cursor.execute("""
-                            SELECT COUNT(*) FROM email_queue eq
-                            JOIN campaigns c ON eq.campaign_id = c.id
-                            WHERE eq.user_id = ? AND eq.status = 'sent' 
-                            AND DATE(eq.sent_at) = ? AND c.sender_email LIKE ?
-                        """, (user_id, today, f'%@{d}'))
-                        domain_sends[d] = cursor.fetchone()[0] or 0
+                        try:
+                            conn = self.db.connect()
+                            cursor = conn.cursor()
+                            cursor.execute("""
+                                SELECT COUNT(*) FROM email_queue eq
+                                JOIN campaigns c ON eq.campaign_id = c.id
+                                WHERE c.user_id = ? AND eq.status = 'sent' 
+                                AND DATE(eq.sent_at) = ? AND c.sender_email LIKE ?
+                            """, (user_id, today, f'%@{d}'))
+                            domain_sends[d] = cursor.fetchone()[0] or 0
+                        except Exception as e:
+                            print(f"Error counting domain sends for {d}: {e}")
+                            domain_sends[d] = 0
                 
                 # Check if current domain is overused
                 current_domain_sends = domain_sends.get(domain, 0)
@@ -211,6 +247,9 @@ class PolicyEnforcer:
             
         except Exception as e:
             print(f"Error enforcing domain rotation: {e}")
+            import traceback
+            traceback.print_exc()
+            # Always allow on error - don't block sends
             return {'allowed': True}
     
     def check_bounce_threshold(self, user_id: int, smtp_server_id: int = None) -> Dict:
@@ -242,10 +281,10 @@ class PolicyEnforcer:
                 else:
                     total_sent = 0
                 
-                # Count bounces (email_tracking has user_id)
+                # Count bounces - check both event_type='bounce' and bounced=1 for compatibility
                 bounce_result = self.db.supabase.client.table('email_tracking').select(
                     'id', count='exact'
-                ).eq('user_id', user_id).eq('event_type', 'bounce').gte('created_at', yesterday.isoformat()).execute()
+                ).eq('user_id', user_id).or_('event_type.eq.bounce,bounced.eq.1').gte('created_at', yesterday.isoformat()).execute()
                 total_bounces = bounce_result.count if bounce_result.count else 0
             else:
                 cursor.execute("""
@@ -256,11 +295,23 @@ class PolicyEnforcer:
                 """, (user_id, yesterday))
                 total_sent = cursor.fetchone()[0] or 0
                 
-                cursor.execute("""
-                    SELECT COUNT(*) FROM email_tracking
-                    WHERE user_id = ? AND event_type = 'bounce' AND created_at >= ?
-                """, (user_id, yesterday))
-                total_bounces = cursor.fetchone()[0] or 0
+                # Try to query email_tracking table, fallback to tracking table if it doesn't exist
+                try:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM email_tracking
+                        WHERE user_id = ? AND (event_type = 'bounce' OR bounced = 1) AND created_at >= ?
+                    """, (user_id, yesterday))
+                    total_bounces = cursor.fetchone()[0] or 0
+                except sqlite3.OperationalError:
+                    # Fallback to tracking table if email_tracking doesn't exist
+                    try:
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM tracking
+                            WHERE event_type = 'bounce' AND created_at >= ?
+                        """, (yesterday,))
+                        total_bounces = cursor.fetchone()[0] or 0
+                    except sqlite3.OperationalError:
+                        total_bounces = 0
             
             if total_sent == 0:
                 return {

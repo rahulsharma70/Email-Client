@@ -232,7 +232,7 @@ class BillingManager:
             'features': plan.get('features', []),
             'emails_per_month': plan.get('emails_per_month', 0)
         }
-    
+
     def create_checkout_session(self, user_id: int, plan_id: str, success_url: str, cancel_url: str) -> Dict:
         """
         Create Stripe Checkout Session for subscription

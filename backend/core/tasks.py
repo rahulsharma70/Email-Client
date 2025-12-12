@@ -88,13 +88,13 @@ def verify_email_task(lead_id: int, user_id: int):
         return {'success': False, 'error': str(e)}
 
 @celery_app.task(name='core.tasks.scrape_leads_task')
-def scrape_leads_task(icp_description: str, job_id: int, user_id: int):
+def scrape_leads_task(icp_description: str, job_id: int, user_id: int, lead_type: str = 'B2B'):
     """Background task to scrape leads"""
     try:
         from database.db_manager import DatabaseManager
         db = DatabaseManager()
         scraper = LeadScraper(db)
-        result = scraper.run_full_scraping_job(icp_description, job_id=job_id, user_id=user_id)
+        result = scraper.run_full_scraping_job(icp_description, job_id=job_id, user_id=user_id, lead_type=lead_type)
         return result
     except Exception as e:
         import traceback

@@ -1358,7 +1358,22 @@ def api_fetch_email_body(account_id, email_uid):
         username = account.get('username', '')
         password = account.get('password', '')
         
+        # Decrypt password if encrypted
+        if password:
+            try:
+                from core.encryption import get_encryption_manager
+                encryptor = get_encryption_manager()
+                password = encryptor.decrypt(password)
+            except Exception as decrypt_error:
+                # If decryption fails, might be plaintext from old data
+                print(f"Password decryption failed (may be plaintext): {decrypt_error}")
+                pass
+        
+        if not imap_host or not username or not password:
+            return jsonify({'error': 'IMAP settings not properly configured'}), 400
+        
         # Connect to IMAP
+        imap = None
         try:
             if imap_port == 993:
                 imap = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=30)
@@ -1370,7 +1385,12 @@ def api_fetch_email_body(account_id, email_uid):
                     pass
             imap.login(username, password)
         except Exception as conn_error:
-            return jsonify({'error': f'Failed to connect: {str(conn_error)}'}), 500
+            if imap:
+                try:
+                    imap.logout()
+                except:
+                    pass
+            return jsonify({'error': f'Failed to connect to IMAP server: {str(conn_error)}'}), 500
         
         # Select folder
         folder_variants = [folder]
@@ -1394,16 +1414,32 @@ def api_fetch_email_body(account_id, email_uid):
                 continue
         
         if not selected:
-            imap.logout()
+            if imap:
+                try:
+                    imap.logout()
+                except:
+                    pass
             return jsonify({'error': f'Could not access folder: {folder}'}), 400
         
         # Fetch full email body
-        email_id = email_uid.encode() if isinstance(email_uid, str) else email_uid
-        status, msg_data = imap.fetch(email_id, '(RFC822)')
-        
-        if status != 'OK' or not msg_data:
-            imap.logout()
-            return jsonify({'error': 'Failed to fetch email body'}), 500
+        try:
+            email_id = email_uid.encode() if isinstance(email_uid, str) else email_uid
+            status, msg_data = imap.fetch(email_id, '(RFC822)')
+            
+            if status != 'OK' or not msg_data:
+                if imap:
+                    try:
+                        imap.logout()
+                    except:
+                        pass
+                return jsonify({'error': 'Failed to fetch email body. Email may have been deleted or moved.'}), 500
+        except Exception as fetch_error:
+            if imap:
+                try:
+                    imap.logout()
+                except:
+                    pass
+            return jsonify({'error': f'Failed to fetch email: {str(fetch_error)}'}), 500
         
         body = ''
         html_body = ''
@@ -1440,7 +1476,11 @@ def api_fetch_email_body(account_id, email_uid):
                             body = str(msg.get_payload())
                 break
         
-        imap.logout()
+        if imap:
+            try:
+                imap.logout()
+            except:
+                pass
         
         return jsonify({
             'success': True,
@@ -1450,8 +1490,17 @@ def api_fetch_email_body(account_id, email_uid):
         
     except Exception as e:
         import traceback
-        print(f"Error fetching email body: {traceback.format_exc()}")
-        return jsonify({'error': str(e)}), 500
+        error_details = traceback.format_exc()
+        print(f"Error fetching email body: {error_details}")
+        
+        # Ensure IMAP connection is closed
+        if 'imap' in locals() and imap:
+            try:
+                imap.logout()
+            except:
+                pass
+        
+        return jsonify({'error': f'Failed to fetch email content: {str(e)}'}), 500
 
 @app.route('/api/inbox/delete', methods=['POST'])
 def api_delete_emails():
@@ -1568,23 +1617,52 @@ def api_get_sent_emails():
     try:
         # Check if using Supabase
         if hasattr(db, 'use_supabase') and db.use_supabase:
-            # Use Supabase methods
+            # Use Supabase methods with retry logic for network errors
             limit = request.args.get('limit', 100, type=int)
             offset = request.args.get('offset', 0, type=int)
             search = request.args.get('search', '')
             
+            # Retry logic for Supabase queries
+            import time
+            max_retries = 3
+            retry_delay = 0.5
+            
             # Get sent emails with joins (Supabase doesn't support complex JOINs easily)
             # For now, get sent_emails and enrich with campaign/recipient data separately
-            query = db.supabase.client.table('sent_emails').select('*')
-            
-            if search:
-                # Supabase text search - filter in Python for now (or use multiple queries)
-                # For better performance, could use Supabase RPC function
-                pass  # Will filter after fetching
-            
-            query = query.order('sent_at', desc=True).range(offset, offset + limit - 1)
-            result = query.execute()
-            sent_emails = result.data if result.data else []
+            sent_emails = []
+            for attempt in range(max_retries):
+                try:
+                    query = db.supabase.client.table('sent_emails').select('*')
+                    query = query.order('sent_at', desc=True).range(offset, offset + limit - 1)
+                    result = query.execute()
+                    sent_emails = result.data if result.data else []
+                    break
+                except Exception as e:
+                    error_msg = str(e)
+                    error_type = str(type(e).__name__)
+                    # Retry on network errors
+                    if 'Resource temporarily unavailable' in error_msg or 'ReadError' in error_type or 'ConnectionError' in error_type or 'OSError' in error_type or attempt < max_retries - 1:
+                        if attempt < max_retries - 1:
+                            print(f"Supabase query error (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                            time.sleep(retry_delay * (attempt + 1))
+                        else:
+                            print(f"Failed to fetch sent emails after {max_retries} attempts: {e}")
+                            # Return empty result instead of crashing
+                            return jsonify({
+                                'success': True,
+                                'sent_emails': [],
+                                'total': 0,
+                                'error': 'Network error, please try again'
+                            })
+                    else:
+                        # Non-network error, don't retry
+                        print(f"Supabase query error: {e}")
+                        return jsonify({
+                            'success': False,
+                            'error': str(e),
+                            'sent_emails': [],
+                            'total': 0
+                        })
             
             # Filter by search term if provided
             if search:
@@ -1594,25 +1672,53 @@ def api_get_sent_emails():
                               search_lower in (e.get('subject', '') or '').lower() or
                               search_lower in (e.get('sender_email', '') or '').lower()]
             
-            # Enrich with campaign and recipient data
+            # Enrich with campaign and recipient data (with retry logic)
             for email in sent_emails:
                 if email.get('campaign_id'):
-                    campaign = db.supabase.client.table('campaigns').select('name').eq('id', email['campaign_id']).execute()
-                    email['campaign_name'] = campaign.data[0]['name'] if campaign.data else None
+                    for attempt in range(max_retries):
+                        try:
+                            campaign = db.supabase.client.table('campaigns').select('name').eq('id', email['campaign_id']).execute()
+                            email['campaign_name'] = campaign.data[0]['name'] if campaign.data else None
+                            break
+                        except Exception as e:
+                            if attempt < max_retries - 1:
+                                time.sleep(retry_delay * (attempt + 1))
+                            else:
+                                email['campaign_name'] = None
+                                
                 if email.get('recipient_id'):
-                    recipient = db.supabase.client.table('recipients').select('first_name,last_name').eq('id', email['recipient_id']).execute()
-                    if recipient.data:
-                        email['first_name'] = recipient.data[0].get('first_name')
-                        email['last_name'] = recipient.data[0].get('last_name')
+                    for attempt in range(max_retries):
+                        try:
+                            recipient = db.supabase.client.table('recipients').select('first_name,last_name').eq('id', email['recipient_id']).execute()
+                            if recipient.data:
+                                email['first_name'] = recipient.data[0].get('first_name')
+                                email['last_name'] = recipient.data[0].get('last_name')
+                            break
+                        except Exception as e:
+                            if attempt < max_retries - 1:
+                                time.sleep(retry_delay * (attempt + 1))
+                            else:
+                                email['first_name'] = None
+                                email['last_name'] = None
             
             # Get total count
             if search:
                 # For search, count filtered results
                 total = len(sent_emails)
             else:
-                count_query = db.supabase.client.table('sent_emails').select('id', count='exact')
-                count_result = count_query.execute()
-                total = count_result.count if hasattr(count_result, 'count') else len(sent_emails)
+                total = len(sent_emails)  # Use length as fallback
+                for attempt in range(max_retries):
+                    try:
+                        count_query = db.supabase.client.table('sent_emails').select('id', count='exact')
+                        count_result = count_query.execute()
+                        total = count_result.count if hasattr(count_result, 'count') else len(sent_emails)
+                        break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay * (attempt + 1))
+                        else:
+                            # Use length as fallback
+                            total = len(sent_emails)
             
             return jsonify({
                 'success': True,
@@ -2153,38 +2259,67 @@ def api_resume_sender():
 def api_dashboard_stats(user_id):
     """Get dashboard statistics with observability metrics"""
     try:
-        queue_stats = db.get_queue_stats()
-        daily_stats = db.get_daily_stats()
+        # Get queue stats (works for both Supabase and SQLite)
+        queue_stats = db.get_queue_stats() if hasattr(db, 'get_queue_stats') else {'pending': 0, 'sent_today': 0}
         
-        total_sent = daily_stats.get('emails_sent', 0)
-        delivered = daily_stats.get('emails_delivered', 0)
-        bounced = daily_stats.get('emails_bounced', 0)
-        spam = daily_stats.get('spam_reports', 0)
+        # Get daily stats (works for both Supabase and SQLite)
+        daily_stats = db.get_daily_stats() if hasattr(db, 'get_daily_stats') else {
+            'emails_sent': 0,
+            'emails_delivered': 0,
+            'emails_bounced': 0,
+            'emails_opened': 0,
+            'emails_clicked': 0,
+            'spam_reports': 0,
+            'unsubscribes': 0
+        }
+        
+        total_sent = daily_stats.get('emails_sent', 0) or 0
+        delivered = daily_stats.get('emails_delivered', 0) or 0
+        bounced = daily_stats.get('emails_bounced', 0) or 0
+        spam = daily_stats.get('spam_reports', 0) or 0
         
         delivery_rate = (delivered / total_sent * 100) if total_sent > 0 else 0
         bounce_rate = (bounced / total_sent * 100) if total_sent > 0 else 0
         spam_rate = (spam / total_sent * 100) if total_sent > 0 else 0
         
-        recipients = db.get_recipients()
-        subscriber_count = len(recipients)
+        # Get recipients count (filter by user_id if provided)
+        recipients = db.get_recipients(user_id=user_id) if user_id else db.get_recipients()
+        subscriber_count = len(recipients) if recipients else 0
         
         # Get observability metrics
+        obs_metrics = {}
         try:
-            obs_metrics = observability_manager.get_dashboard_metrics(user_id)
-        except:
-            obs_metrics = {}
+            if user_id:
+                obs_metrics = observability_manager.get_dashboard_metrics(user_id)
+        except Exception as obs_error:
+            print(f"Error getting observability metrics: {obs_error}")
         
         return jsonify({
+            'success': True,
             'sent_today': queue_stats.get('sent_today', 0),
             'pending': queue_stats.get('pending', 0),
             'delivery_rate': round(delivery_rate, 1),
             'bounce_rate': round(bounce_rate, 1),
             'spam_rate': round(spam_rate, 1),
             'subscribers': subscriber_count,
-            'daily_stats': daily_stats
+            'daily_stats': daily_stats,
+            'observability': obs_metrics
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        import traceback
+        print(f"Error in api_dashboard_stats: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'sent_today': 0,
+            'pending': 0,
+            'delivery_rate': 0,
+            'bounce_rate': 0,
+            'spam_rate': 0,
+            'subscribers': 0,
+            'daily_stats': {}
+        }), 500
 
 @app.route('/api/campaign/create', methods=['POST'])
 @require_auth
@@ -2330,20 +2465,26 @@ def api_create_campaign(user_id):
                 print("⚠ No selected SMTP servers found in request")
             
             # Validate selected servers
-            if selected_smtp_servers and len(selected_smtp_servers) != 4:
-                return jsonify({'error': f'Please select exactly 4 SMTP servers. You selected {len(selected_smtp_servers)}.'}), 400
+            # Allow any number of SMTP servers (minimum 1)
+            if selected_smtp_servers and len(selected_smtp_servers) < 1:
+                return jsonify({'error': 'Please select at least 1 SMTP server.'}), 400
             
             # Check if SMTP servers are configured
             if not selected_smtp_servers:
-                smtp_servers = db.get_smtp_servers()
-                if not smtp_servers:
-                    return jsonify({'error': 'No SMTP server configured. Please select 4 SMTP servers.'}), 400
+                smtp_servers = db.get_smtp_servers(user_id=user_id, active_only=True)
+                if not smtp_servers or len(smtp_servers) == 0:
+                    return jsonify({'error': 'No active SMTP server configured. Please add at least 1 SMTP server.'}), 400
             
             # Update campaign status to 'sending'
-            conn = db.connect()
-            cursor = conn.cursor()
-            cursor.execute("UPDATE campaigns SET status = 'sending' WHERE id = ?", (campaign_id,))
-            conn.commit()
+            # Check if using Supabase FIRST before trying to use SQLite methods
+            use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
+            if use_supabase:
+                db.supabase.client.table('campaigns').update({'status': 'sending'}).eq('id', campaign_id).execute()
+            else:
+                conn = db.connect()
+                cursor = conn.cursor()
+                cursor.execute("UPDATE campaigns SET status = 'sending' WHERE id = ?", (campaign_id,))
+                conn.commit()
             
             # Add to queue with round-robin distribution using selected servers
             emails_per_server = 20  # 20 emails per SMTP server
@@ -2482,33 +2623,56 @@ def api_list_recipients(user_id):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/recipients/delete/<int:recipient_id>', methods=['DELETE'])
-def api_delete_recipient(recipient_id):
+@require_auth
+def api_delete_recipient(recipient_id, user_id):
     """Delete a single recipient"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
         
-        # Delete from recipients table
-        cursor.execute("DELETE FROM recipients WHERE id = ?", (recipient_id,))
-        deleted = cursor.rowcount > 0
-        
-        # Also remove from campaign_recipients if exists
-        cursor.execute("DELETE FROM campaign_recipients WHERE recipient_id = ?", (recipient_id,))
-        
-        # Remove from email queue
-        cursor.execute("DELETE FROM email_queue WHERE recipient_id = ?", (recipient_id,))
-        
-        conn.commit()
-        
-        if deleted:
+        if use_supabase:
+            # Check if recipient exists and belongs to user
+            result = db.supabase.client.table('recipients').select('id').eq('id', recipient_id).eq('user_id', user_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Recipient not found or access denied'}), 404
+            
+            # Delete related data first
+            try:
+                db.supabase.client.table('campaign_recipients').delete().eq('recipient_id', recipient_id).execute()
+            except:
+                pass
+            db.supabase.client.table('email_queue').delete().eq('recipient_id', recipient_id).execute()
+            
+            # Delete recipient
+            db.supabase.client.table('recipients').delete().eq('id', recipient_id).execute()
+            
             return jsonify({'success': True, 'message': 'Recipient deleted'})
         else:
-            return jsonify({'error': 'Recipient not found'}), 404
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            # Verify ownership
+            cursor.execute("SELECT id FROM recipients WHERE id = ? AND user_id = ?", (recipient_id, user_id))
+            if not cursor.fetchone():
+                return jsonify({'error': 'Recipient not found or access denied'}), 404
+            
+            # Delete from recipients table
+            cursor.execute("DELETE FROM campaign_recipients WHERE recipient_id = ?", (recipient_id,))
+            cursor.execute("DELETE FROM email_queue WHERE recipient_id = ?", (recipient_id,))
+            cursor.execute("DELETE FROM recipients WHERE id = ?", (recipient_id,))
+            
+            conn.commit()
+            
+            return jsonify({'success': True, 'message': 'Recipient deleted'})
     except Exception as e:
+        import traceback
+        print(f"Error deleting recipient: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/recipients/delete/bulk', methods=['POST'])
-def api_delete_recipients_bulk():
+@require_auth
+def api_delete_recipients_bulk(user_id):
     """Delete multiple recipients"""
     try:
         data = request.json if request.is_json else request.form.to_dict()
@@ -2517,50 +2681,134 @@ def api_delete_recipients_bulk():
         if not recipient_ids:
             return jsonify({'error': 'No recipient IDs provided'}), 400
         
-        conn = db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
         
-        # Create placeholders for SQL IN clause
-        placeholders = ','.join(['?'] * len(recipient_ids))
-        
-        # Delete from recipients
-        cursor.execute(f"DELETE FROM recipients WHERE id IN ({placeholders})", recipient_ids)
-        deleted_count = cursor.rowcount
-        
-        # Delete from campaign_recipients
-        cursor.execute(f"DELETE FROM campaign_recipients WHERE recipient_id IN ({placeholders})", recipient_ids)
-        
-        # Delete from email queue
-        cursor.execute(f"DELETE FROM email_queue WHERE recipient_id IN ({placeholders})", recipient_ids)
-        
-        conn.commit()
-        
-        return jsonify({'success': True, 'deleted_count': deleted_count})
+        if use_supabase:
+            # Verify ownership - only delete recipients that belong to user
+            result = db.supabase.client.table('recipients').select('id').eq('user_id', user_id).in_('id', recipient_ids).execute()
+            valid_ids = [r['id'] for r in (result.data or [])]
+            
+            if not valid_ids:
+                return jsonify({'error': 'No valid recipients found or access denied'}), 404
+            
+            # Delete related data first
+            try:
+                db.supabase.client.table('campaign_recipients').delete().in_('recipient_id', valid_ids).execute()
+            except:
+                pass
+            db.supabase.client.table('email_queue').delete().in_('recipient_id', valid_ids).execute()
+            
+            # Delete recipients
+            db.supabase.client.table('recipients').delete().in_('id', valid_ids).execute()
+            
+            return jsonify({'success': True, 'deleted_count': len(valid_ids)})
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            # Verify ownership
+            placeholders = ','.join(['?'] * len(recipient_ids))
+            cursor.execute(f"SELECT id FROM recipients WHERE id IN ({placeholders}) AND user_id = ?", recipient_ids + [user_id])
+            valid_ids = [row[0] for row in cursor.fetchall()]
+            
+            if not valid_ids:
+                return jsonify({'error': 'No valid recipients found or access denied'}), 404
+            
+            valid_placeholders = ','.join(['?'] * len(valid_ids))
+            
+            # Delete recipients and related data
+            cursor.execute(f"DELETE FROM campaign_recipients WHERE recipient_id IN ({valid_placeholders})", valid_ids)
+            cursor.execute(f"DELETE FROM email_queue WHERE recipient_id IN ({valid_placeholders})", valid_ids)
+            cursor.execute(f"DELETE FROM recipients WHERE id IN ({valid_placeholders})", valid_ids)
+            
+            conn.commit()
+            
+            return jsonify({'success': True, 'deleted_count': len(valid_ids)})
     except Exception as e:
+        import traceback
+        print(f"Error deleting recipients: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/recipients/delete/all', methods=['DELETE'])
-def api_delete_all_recipients():
-    """Delete all recipients"""
+@require_auth
+def api_delete_all_recipients(user_id):
+    """Delete all recipients for the current user"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
         
-        # Get count before deletion
-        cursor.execute("SELECT COUNT(*) FROM recipients")
-        count = cursor.fetchone()[0]
-        
-        # Delete all recipients
-        cursor.execute("DELETE FROM recipients")
-        
-        # Also clear related data
-        cursor.execute("DELETE FROM campaign_recipients")
-        cursor.execute("DELETE FROM email_queue WHERE recipient_id IS NOT NULL")
-        
-        conn.commit()
-        
-        return jsonify({'success': True, 'deleted_count': count})
+        if use_supabase:
+            # Check if recipients table exists
+            if hasattr(db, '_ensure_table_exists'):
+                try:
+                    db._ensure_table_exists('recipients', 'delete all recipients')
+                except Exception as table_error:
+                    return jsonify({'error': str(table_error)}), 500
+            
+            # Get all recipient IDs for this user
+            result = db.supabase.client.table('recipients').select('id').eq('user_id', user_id).execute()
+            recipient_ids = [r['id'] for r in (result.data or [])]
+            count = len(recipient_ids)
+            
+            if count == 0:
+                return jsonify({'success': True, 'deleted_count': 0, 'message': 'No recipients found'})
+            
+            # Delete related data first (only if tables exist)
+            if recipient_ids:
+                try:
+                    db.supabase.client.table('campaign_recipients').delete().in_('recipient_id', recipient_ids).execute()
+                except Exception as e:
+                    # Table might not exist, continue
+                    print(f"⚠ Could not delete from campaign_recipients: {e}")
+                    pass
+                
+                # Check if email_queue table exists before trying to delete
+                try:
+                    if hasattr(db, '_check_table_exists') and db._check_table_exists('email_queue'):
+                        db.supabase.client.table('email_queue').delete().in_('recipient_id', recipient_ids).execute()
+                    else:
+                        print("⚠ email_queue table does not exist, skipping deletion")
+                except Exception as e:
+                    # Table might not exist, continue
+                    print(f"⚠ Could not delete from email_queue: {e}")
+                    pass
+            
+            # Delete recipients
+            db.supabase.client.table('recipients').delete().eq('user_id', user_id).execute()
+            
+            return jsonify({'success': True, 'deleted_count': count})
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            # Get count before deletion
+            cursor.execute("SELECT COUNT(*) FROM recipients WHERE user_id = ?", (user_id,))
+            count = cursor.fetchone()[0]
+            
+            if count == 0:
+                return jsonify({'success': True, 'deleted_count': 0, 'message': 'No recipients found'})
+            
+            # Get recipient IDs for related data deletion
+            cursor.execute("SELECT id FROM recipients WHERE user_id = ?", (user_id,))
+            recipient_ids = [row[0] for row in cursor.fetchall()]
+            
+            if recipient_ids:
+                placeholders = ','.join(['?'] * len(recipient_ids))
+                cursor.execute(f"DELETE FROM campaign_recipients WHERE recipient_id IN ({placeholders})", recipient_ids)
+                cursor.execute(f"DELETE FROM email_queue WHERE recipient_id IN ({placeholders})", recipient_ids)
+            
+            # Delete all recipients for this user
+            cursor.execute("DELETE FROM recipients WHERE user_id = ?", (user_id,))
+            
+            conn.commit()
+            
+            return jsonify({'success': True, 'deleted_count': count})
     except Exception as e:
+        import traceback
+        print(f"Error deleting all recipients: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/smtp/add', methods=['POST'])
@@ -3331,32 +3579,41 @@ def api_get_smtp(server_id):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/smtp/delete/<int:server_id>', methods=['DELETE'])
-def api_delete_smtp(server_id):
+@require_auth
+def api_delete_smtp(server_id, user_id):
     """Delete SMTP server"""
     try:
-        # Check if using Supabase
-        if hasattr(db, 'use_supabase') and db.use_supabase:
-            # Use Supabase
-            result = db.supabase.client.table('smtp_servers').delete().eq('id', server_id).execute()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
+        
+        if use_supabase:
+            # Check if server exists and belongs to user
+            result = db.supabase.client.table('smtp_servers').select('id').eq('id', server_id).eq('user_id', user_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'SMTP server not found or access denied'}), 404
             
-            if result.data and len(result.data) > 0:
-                return jsonify({'success': True, 'message': 'SMTP server deleted'})
-            else:
-                return jsonify({'error': 'Server not found'}), 404
+            # Delete server
+            db.supabase.client.table('smtp_servers').delete().eq('id', server_id).execute()
+            
+            return jsonify({'success': True, 'message': 'SMTP server deleted'})
         else:
             # SQLite
             conn = db.connect()
             cursor = conn.cursor()
+            
+            # Check if server exists and belongs to user
+            cursor.execute("SELECT id FROM smtp_servers WHERE id = ? AND user_id = ?", (server_id, user_id))
+            if not cursor.fetchone():
+                return jsonify({'error': 'SMTP server not found or access denied'}), 404
+            
+            # Delete server
             cursor.execute("DELETE FROM smtp_servers WHERE id = ?", (server_id,))
             conn.commit()
             
-            if cursor.rowcount > 0:
-                return jsonify({'success': True, 'message': 'SMTP server deleted'})
-            else:
-                return jsonify({'error': 'Server not found'}), 404
+            return jsonify({'success': True, 'message': 'SMTP server deleted'})
     except Exception as e:
         import traceback
-        traceback.print_exc()
+        print(f"Error deleting SMTP server: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/smtp/toggle/<int:server_id>', methods=['POST'])
@@ -3452,16 +3709,33 @@ def api_get_template(template_id):
 def api_delete_template(template_id):
     """Delete a template"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM templates WHERE id = ?", (template_id,))
-        conn.commit()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
         
-        if cursor.rowcount > 0:
+        if use_supabase:
+            # Check if template exists
+            result = db.supabase.client.table('templates').select('id').eq('id', template_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Template not found'}), 404
+            
+            # Delete template
+            db.supabase.client.table('templates').delete().eq('id', template_id).execute()
+            
             return jsonify({'success': True, 'message': 'Template deleted'})
         else:
-            return jsonify({'error': 'Template not found'}), 404
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+            conn.commit()
+            
+            if cursor.rowcount > 0:
+                return jsonify({'success': True, 'message': 'Template deleted'})
+            else:
+                return jsonify({'error': 'Template not found'}), 404
     except Exception as e:
+        import traceback
+        print(f"Error deleting template: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/campaigns')
@@ -3475,36 +3749,65 @@ def api_get_campaigns(user_id):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/campaigns/delete/<int:campaign_id>', methods=['DELETE'])
-def api_delete_campaign(campaign_id):
+@require_auth
+def api_delete_campaign(campaign_id, user_id):
     """Delete a single campaign"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
         
-        # Delete campaign and related data
-        cursor.execute("DELETE FROM campaigns WHERE id = ?", (campaign_id,))
-        deleted = cursor.rowcount > 0
-        
-        # Delete related queue items
-        cursor.execute("DELETE FROM email_queue WHERE campaign_id = ?", (campaign_id,))
-        
-        # Delete campaign recipients
-        cursor.execute("DELETE FROM campaign_recipients WHERE campaign_id = ?", (campaign_id,))
-        
-        # Delete tracking data
-        cursor.execute("DELETE FROM tracking WHERE campaign_id = ?", (campaign_id,))
-        
-        conn.commit()
-        
-        if deleted:
+        if use_supabase:
+            # Check if campaign exists and belongs to user
+            result = db.supabase.client.table('campaigns').select('id').eq('id', campaign_id).eq('user_id', user_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Campaign not found or access denied'}), 404
+            
+            # Delete related data first (CASCADE should handle this, but doing explicitly)
+            db.supabase.client.table('email_queue').delete().eq('campaign_id', campaign_id).execute()
+            # Note: campaign_recipients and tracking tables might not exist, handle gracefully
+            try:
+                db.supabase.client.table('campaign_recipients').delete().eq('campaign_id', campaign_id).execute()
+            except:
+                pass
+            try:
+                db.supabase.client.table('tracking').delete().eq('campaign_id', campaign_id).execute()
+            except:
+                pass
+            
+            # Delete campaign
+            db.supabase.client.table('campaigns').delete().eq('id', campaign_id).execute()
+            
             return jsonify({'success': True, 'message': 'Campaign deleted'})
         else:
-            return jsonify({'error': 'Campaign not found'}), 404
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            # Verify ownership
+            cursor.execute("SELECT id FROM campaigns WHERE id = ? AND user_id = ?", (campaign_id, user_id))
+            if not cursor.fetchone():
+                return jsonify({'error': 'Campaign not found or access denied'}), 404
+            
+            # Delete campaign and related data
+            cursor.execute("DELETE FROM email_queue WHERE campaign_id = ?", (campaign_id,))
+            cursor.execute("DELETE FROM campaign_recipients WHERE campaign_id = ?", (campaign_id,))
+            try:
+                cursor.execute("DELETE FROM tracking WHERE campaign_id = ?", (campaign_id,))
+            except:
+                pass
+            cursor.execute("DELETE FROM campaigns WHERE id = ?", (campaign_id,))
+            
+            conn.commit()
+            
+            return jsonify({'success': True, 'message': 'Campaign deleted'})
     except Exception as e:
+        import traceback
+        print(f"Error deleting campaign: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/campaigns/delete/bulk', methods=['POST'])
-def api_delete_campaigns_bulk():
+@require_auth
+def api_delete_campaigns_bulk(user_id):
     """Delete multiple campaigns"""
     try:
         data = request.json if request.is_json else request.form.to_dict()
@@ -3513,114 +3816,204 @@ def api_delete_campaigns_bulk():
         if not campaign_ids:
             return jsonify({'error': 'No campaign IDs provided'}), 400
         
-        conn = db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
         
-        # Create placeholders for SQL IN clause
-        placeholders = ','.join(['?'] * len(campaign_ids))
-        
-        # Delete campaigns
-        cursor.execute(f"DELETE FROM campaigns WHERE id IN ({placeholders})", campaign_ids)
-        deleted_count = cursor.rowcount
-        
-        # Delete related queue items
-        cursor.execute(f"DELETE FROM email_queue WHERE campaign_id IN ({placeholders})", campaign_ids)
-        
-        # Delete campaign recipients
-        cursor.execute(f"DELETE FROM campaign_recipients WHERE campaign_id IN ({placeholders})", campaign_ids)
-        
-        # Delete tracking data
-        cursor.execute(f"DELETE FROM tracking WHERE campaign_id IN ({placeholders})", campaign_ids)
-        
-        conn.commit()
-        
-        return jsonify({'success': True, 'deleted_count': deleted_count})
+        if use_supabase:
+            # Verify ownership - only delete campaigns that belong to user
+            result = db.supabase.client.table('campaigns').select('id').eq('user_id', user_id).in_('id', campaign_ids).execute()
+            valid_ids = [c['id'] for c in (result.data or [])]
+            
+            if not valid_ids:
+                return jsonify({'error': 'No valid campaigns found or access denied'}), 404
+            
+            # Delete related data first
+            db.supabase.client.table('email_queue').delete().in_('campaign_id', valid_ids).execute()
+            try:
+                db.supabase.client.table('campaign_recipients').delete().in_('campaign_id', valid_ids).execute()
+            except:
+                pass
+            try:
+                db.supabase.client.table('tracking').delete().in_('campaign_id', valid_ids).execute()
+            except:
+                pass
+            
+            # Delete campaigns
+            db.supabase.client.table('campaigns').delete().in_('id', valid_ids).execute()
+            
+            return jsonify({'success': True, 'deleted_count': len(valid_ids)})
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            # Verify ownership and build placeholders
+            placeholders = ','.join(['?'] * len(campaign_ids))
+            cursor.execute(f"SELECT id FROM campaigns WHERE id IN ({placeholders}) AND user_id = ?", campaign_ids + [user_id])
+            valid_ids = [row[0] for row in cursor.fetchall()]
+            
+            if not valid_ids:
+                return jsonify({'error': 'No valid campaigns found or access denied'}), 404
+            
+            valid_placeholders = ','.join(['?'] * len(valid_ids))
+            
+            # Delete campaigns and related data
+            cursor.execute(f"DELETE FROM email_queue WHERE campaign_id IN ({valid_placeholders})", valid_ids)
+            cursor.execute(f"DELETE FROM campaign_recipients WHERE campaign_id IN ({valid_placeholders})", valid_ids)
+            try:
+                cursor.execute(f"DELETE FROM tracking WHERE campaign_id IN ({valid_placeholders})", valid_ids)
+            except:
+                pass
+            cursor.execute(f"DELETE FROM campaigns WHERE id IN ({valid_placeholders})", valid_ids)
+            
+            conn.commit()
+            
+            return jsonify({'success': True, 'deleted_count': len(valid_ids)})
     except Exception as e:
+        import traceback
+        print(f"Error deleting campaigns: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/campaigns/delete/drafts', methods=['DELETE'])
-def api_delete_draft_campaigns():
-    """Delete all draft campaigns"""
+@require_auth
+def api_delete_draft_campaigns(user_id):
+    """Delete all draft campaigns for the current user"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
         
-        # Get count before deletion
-        cursor.execute("SELECT COUNT(*) FROM campaigns WHERE status = 'draft'")
-        count = cursor.fetchone()[0]
-        
-        # Get draft campaign IDs
-        cursor.execute("SELECT id FROM campaigns WHERE status = 'draft'")
-        draft_ids = [row[0] for row in cursor.fetchall()]
-        
-        if not draft_ids:
-            return jsonify({'success': True, 'deleted_count': 0, 'message': 'No draft campaigns found'})
-        
-        # Create placeholders
-        placeholders = ','.join(['?'] * len(draft_ids))
-        
-        # Delete campaigns
-        cursor.execute(f"DELETE FROM campaigns WHERE id IN ({placeholders})", draft_ids)
-        
-        # Delete related queue items
-        cursor.execute(f"DELETE FROM email_queue WHERE campaign_id IN ({placeholders})", draft_ids)
-        
-        # Delete campaign recipients
-        cursor.execute(f"DELETE FROM campaign_recipients WHERE campaign_id IN ({placeholders})", draft_ids)
-        
-        # Delete tracking data
-        cursor.execute(f"DELETE FROM tracking WHERE campaign_id IN ({placeholders})", draft_ids)
-        
-        conn.commit()
-        
-        return jsonify({'success': True, 'deleted_count': count})
+        if use_supabase:
+            # Get all draft campaign IDs for this user
+            result = db.supabase.client.table('campaigns').select('id').eq('status', 'draft').eq('user_id', user_id).execute()
+            draft_ids = [c['id'] for c in (result.data or [])]
+            
+            if not draft_ids:
+                return jsonify({'success': True, 'deleted_count': 0, 'message': 'No draft campaigns found'})
+            
+            # Delete related data first
+            db.supabase.client.table('email_queue').delete().in_('campaign_id', draft_ids).execute()
+            try:
+                db.supabase.client.table('campaign_recipients').delete().in_('campaign_id', draft_ids).execute()
+            except:
+                pass
+            try:
+                db.supabase.client.table('tracking').delete().in_('campaign_id', draft_ids).execute()
+            except:
+                pass
+            
+            # Delete campaigns
+            db.supabase.client.table('campaigns').delete().in_('id', draft_ids).execute()
+            
+            return jsonify({'success': True, 'deleted_count': len(draft_ids)})
+        else:
+            # SQLite
+            conn = db.connect()
+            cursor = conn.cursor()
+            
+            # Get all draft campaign IDs for this user
+            cursor.execute("SELECT id FROM campaigns WHERE status = 'draft' AND user_id = ?", (user_id,))
+            draft_ids = [row[0] for row in cursor.fetchall()]
+            
+            if not draft_ids:
+                return jsonify({'success': True, 'deleted_count': 0, 'message': 'No draft campaigns found'})
+            
+            # Build placeholders
+            placeholders = ','.join(['?'] * len(draft_ids))
+            
+            # Delete campaigns and related data
+            cursor.execute(f"DELETE FROM email_queue WHERE campaign_id IN ({placeholders})", draft_ids)
+            cursor.execute(f"DELETE FROM campaign_recipients WHERE campaign_id IN ({placeholders})", draft_ids)
+            try:
+                cursor.execute(f"DELETE FROM tracking WHERE campaign_id IN ({placeholders})", draft_ids)
+            except:
+                pass
+            cursor.execute(f"DELETE FROM campaigns WHERE id IN ({placeholders})", draft_ids)
+            
+            conn.commit()
+            
+            return jsonify({'success': True, 'deleted_count': len(draft_ids)})
     except Exception as e:
+        import traceback
+        print(f"Error deleting draft campaigns: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/campaigns/send/<int:campaign_id>', methods=['POST'])
-def api_send_campaign(campaign_id):
+@require_auth
+def api_send_campaign(campaign_id, user_id):
     """Send a draft campaign"""
     try:
-        conn = db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
         
         # Get campaign
-        cursor.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,))
-        row = cursor.fetchone()
-        if not row:
-            return jsonify({'error': 'Campaign not found'}), 404
+        if use_supabase:
+            result = db.supabase.client.table('campaigns').select('*').eq('id', campaign_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Campaign not found'}), 404
+            campaign = result.data[0]
+        else:
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({'error': 'Campaign not found'}), 404
+            campaign = dict(row)
         
-        campaign = dict(row)
+        # Check if campaign belongs to user
+        if campaign.get('user_id') != user_id:
+            return jsonify({'error': 'Campaign not found or access denied'}), 404
         
         # Check if campaign is draft
-        if campaign['status'] != 'draft':
-            return jsonify({'error': f'Campaign is not a draft (status: {campaign["status"]})'}), 400
+        if campaign.get('status') != 'draft':
+            return jsonify({'error': f'Campaign is not a draft (status: {campaign.get("status")})'}), 400
         
-        # Get recipients
-        recipients = db.get_recipients()
-        if not recipients:
-            return jsonify({'error': 'No recipients found'}), 400
+        # Get recipients for this user
+        recipients = db.get_recipients(user_id=user_id)
+        if not recipients or len(recipients) == 0:
+            return jsonify({'error': 'No recipients found. Please add recipients first.'}), 400
         
         recipient_ids = [r['id'] for r in recipients]
         
-        # Get default SMTP server
-        default_server = db.get_default_smtp_server()
-        if not default_server:
-            smtp_servers = db.get_smtp_servers()
-            if not smtp_servers:
-                return jsonify({'error': 'No SMTP server configured'}), 400
-            smtp_id = smtp_servers[0]['id']
-        else:
-            smtp_id = default_server['id']
+        # Get SMTP servers for this user
+        smtp_servers = db.get_smtp_servers(user_id=user_id, active_only=True)
+        if not smtp_servers or len(smtp_servers) == 0:
+            return jsonify({'error': 'No active SMTP server configured. Please add an SMTP server first.'}), 400
+        
+        # Get selected SMTP servers from request or use all active
+        selected_smtp_servers = request.json.get('selected_smtp_servers', []) if request.is_json else request.form.getlist('selected_smtp_servers')
+        if not selected_smtp_servers:
+            selected_smtp_servers = [s['id'] for s in smtp_servers]
         
         # Update campaign status to 'sending'
-        cursor.execute("UPDATE campaigns SET status = 'sending' WHERE id = ?", (campaign_id,))
-        conn.commit()
+        if use_supabase:
+            db.supabase.client.table('campaigns').update({'status': 'sending'}).eq('id', campaign_id).execute()
+        else:
+            cursor.execute("UPDATE campaigns SET status = 'sending' WHERE id = ?", (campaign_id,))
+            conn.commit()
         
-        # Add to queue with round-robin distribution (20 emails per SMTP server)
-        emails_per_server = 20  # 20 emails per SMTP server
-        db.add_to_queue(campaign_id, recipient_ids, smtp_server_id=None, emails_per_server=emails_per_server)
-        print(f"Added {len(recipient_ids)} emails to queue for campaign {campaign_id}")
+        # Add to queue with round-robin distribution
+        try:
+            if request.is_json:
+                emails_per_server = int(request.json.get('emails_per_server', 20))
+            else:
+                emails_per_server = int(request.form.get('emails_per_server', 20))
+        except:
+            emails_per_server = 20
+        
+        # Add to queue with selected SMTP servers
+        added_count = db.add_to_queue(
+            campaign_id, 
+            recipient_ids, 
+            smtp_server_id=None, 
+            emails_per_server=emails_per_server,
+            selected_smtp_servers=selected_smtp_servers
+        )
+        
+        if added_count == 0:
+            return jsonify({'error': 'No emails were added to queue. Check if recipients are unsubscribed or already queued.'}), 400
+        
+        print(f"Added {added_count} emails to queue for campaign {campaign_id}")
         
         # Start sending in background thread
         import threading
@@ -3646,7 +4039,12 @@ def api_send_campaign(campaign_id):
         sender_thread = threading.Thread(target=start_sender, daemon=True)
         sender_thread.start()
         
-        return jsonify({'success': True, 'message': f'Campaign queued for sending to {len(recipient_ids)} recipients'})
+        return jsonify({
+            'success': True, 
+            'message': f'Campaign queued successfully. {added_count} emails added to queue.',
+            'queued_count': added_count,
+            'total_recipients': len(recipient_ids)
+        })
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
@@ -3746,9 +4144,13 @@ def api_scrape_leads(user_id):
     try:
         data = request.json if request.is_json else request.form.to_dict()
         icp_description = data.get('icp_description', '')
+        lead_type = data.get('lead_type', 'B2B').upper()  # B2B or B2C
         
         if not icp_description:
             return jsonify({'error': 'ICP description is required'}), 400
+        
+        if lead_type not in ['B2B', 'B2C']:
+            return jsonify({'error': 'lead_type must be B2B or B2C'}), 400
         
         from core.lead_scraper import LeadScraper
         scraper = LeadScraper(db)
@@ -3756,28 +4158,36 @@ def api_scrape_leads(user_id):
         # Create job record first to get job_id
         # Check if using Supabase
         if hasattr(db, 'use_supabase') and db.use_supabase:
-            job_id = db.create_scraping_job(icp_description, user_id)
+            job_id = db.create_scraping_job(icp_description, user_id, lead_type=lead_type)
         else:
             # SQLite
             conn = db.connect()
             cursor = conn.cursor()
+            # Add lead_type column if it doesn't exist
+            try:
+                import sqlite3
+                cursor.execute("ALTER TABLE lead_scraping_jobs ADD COLUMN lead_type TEXT DEFAULT 'B2B'")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            
             cursor.execute("""
-                INSERT INTO lead_scraping_jobs (icp_description, status, user_id)
-                VALUES (?, 'running', ?)
-            """, (icp_description, user_id))
+                INSERT INTO lead_scraping_jobs (icp_description, status, user_id, lead_type)
+                VALUES (?, 'running', ?, ?)
+            """, (icp_description, user_id, lead_type))
             job_id = cursor.lastrowid
             conn.commit()
         
         # Use Celery task for background processing
         try:
             from core.tasks import scrape_leads_task
-            scrape_leads_task.delay(icp_description, job_id, user_id)
+            scrape_leads_task.delay(icp_description, job_id, user_id, lead_type)
         except:
             # Fallback to threading if Celery not available
             import threading
             def run_scraping():
                 try:
-                    result = scraper.run_full_scraping_job(icp_description, job_id=job_id)
+                    result = scraper.run_full_scraping_job(icp_description, job_id=job_id, user_id=user_id, lead_type=lead_type)
                     print(f"Scraping job {result.get('job_id')} completed: {result.get('leads_found')} leads found, {result.get('verified_leads')} verified")
                 except Exception as e:
                     print(f"Error in scraping job: {e}")
@@ -3816,6 +4226,9 @@ def api_list_leads(user_id):
         company_name = request.args.get('company_name', '')
         
         leads = db.get_leads(verified_only=verified_only, company_name=company_name, user_id=user_id)
+        # Ensure leads is a list (handle None case)
+        if leads is None:
+            leads = []
         return jsonify({'success': True, 'leads': leads, 'count': len(leads)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500

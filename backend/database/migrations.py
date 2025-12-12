@@ -348,7 +348,58 @@ class MigrationManager:
         except sqlite3.OperationalError:
             pass  # Column may already exist
         
+        # Ensure email_tracking table exists with proper schema
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS email_tracking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                campaign_id INTEGER,
+                recipient_id INTEGER,
+                email_address TEXT NOT NULL,
+                event_type TEXT DEFAULT 'sent',
+                sent_at TIMESTAMP,
+                opened_at TIMESTAMP,
+                clicked_at TIMESTAMP,
+                bounced INTEGER DEFAULT 0,
+                unsubscribed INTEGER DEFAULT 0,
+                bounce_type TEXT,
+                bounce_reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (campaign_id) REFERENCES campaigns(id),
+                FOREIGN KEY (recipient_id) REFERENCES recipients(id)
+            )
+        """)
+        
+        # Add missing columns to email_tracking if they don't exist
+        columns_to_add = [
+            ('user_id', 'INTEGER'),
+            ('event_type', 'TEXT DEFAULT \'sent\''),
+            ('bounce_type', 'TEXT'),
+            ('bounce_reason', 'TEXT'),
+        ]
+        for col_name, col_type in columns_to_add:
+            try:
+                cursor.execute(f"ALTER TABLE email_tracking ADD COLUMN {col_name} {col_type}")
+                print(f"✓ Added column: email_tracking.{col_name}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+        
+        # Update daily_stats to include user_id
+        try:
+            cursor.execute("ALTER TABLE daily_stats ADD COLUMN user_id INTEGER")
+            print("✓ Added user_id column to daily_stats")
+        except sqlite3.OperationalError:
+            pass
+        
+        # Remove UNIQUE constraint on date if it exists and add unique on (user_id, date)
+        try:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_stats_user_date ON daily_stats(user_id, date)")
+        except sqlite3.OperationalError:
+            pass
+        
         conn.commit()
+        print("✓ Email tracking table and columns updated")
     
     def validate_tenant_isolation(self) -> List[Dict]:
         """Validate that all queries properly filter by user_id"""

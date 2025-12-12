@@ -245,6 +245,79 @@ Return ONLY the JSON array, no additional text."""
         print("extract_companies_from_icp: Perplexity failed to return companies; using MOCK list.")
         return MOCK_COMPANIES.copy()
 
+    def extract_individuals_from_icp(self, icp_description: str) -> List[Dict]:
+        """
+        Extract individual people from ICP description (B2C mode)
+        Examples: students, engineers, freelancers, professionals, etc.
+
+        Args:
+            icp_description: Description of Ideal Customer Profile
+
+        Returns:
+            List of individual person dictionaries with name, email, profession, etc.
+        """
+        prompt = f"""Based on this Ideal Customer Profile (ICP) description, extract a list of real individual people that match this profile.
+
+ICP Description: {icp_description}
+
+This is for B2C (Business-to-Consumer) targeting, so find INDIVIDUAL PEOPLE, not companies.
+Examples: Students, Engineers, Freelancers, Professionals, Small Business Owners, etc.
+
+Please provide a JSON array of individuals with the following structure:
+[
+  {{
+    "name": "Full Name",
+    "email": "email@example.com" or null if not available,
+    "title": "Job Title or Profession",
+    "profession": "Engineer/Student/Designer/etc.",
+    "company": "Company Name" or "University Name" or null,
+    "institution": "School/University Name" if applicable,
+    "domain": "emaildomain.com" if email provided, or inferred domain,
+    "location": "City, Country" if available,
+    "linkedin": "LinkedIn profile URL" if available
+  }}
+]
+
+Extract at least 15-20 individuals that match this ICP. Focus on real, existing people.
+Return ONLY the JSON array, no additional text."""
+
+        for candidate_model in ("llama-3.1-sonar-large-128k-online", "sonar"):
+            resp_json = self._perplexity_api_call(prompt, candidate_model=candidate_model)
+            if not resp_json:
+                continue
+
+            content = None
+            if isinstance(resp_json, dict):
+                choices = resp_json.get("choices")
+                if choices and isinstance(choices, list) and len(choices) > 0:
+                    content = choices[0].get("message", {}).get("content") or choices[0].get("text") or None
+                if content is None:
+                    content = resp_json.get("answer") or resp_json.get("result") or resp_json.get("text")
+
+            if content is None:
+                content = json.dumps(resp_json)
+
+            arr_text = self._extract_json_array_from_text(content)
+            if arr_text:
+                try:
+                    individuals = json.loads(arr_text)
+                    if isinstance(individuals, list):
+                        return individuals
+                except json.JSONDecodeError as e:
+                    print("Error parsing extracted JSON array:", e)
+                    continue
+
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                pass
+
+        # Fallback: return empty list (B2C scraping without API is harder)
+        print("extract_individuals_from_icp: Perplexity failed to return individuals.")
+        return []
+
     def extract_decision_makers(self, company_name: str, company_domain: str) -> List[Dict]:
         """
         Extract decision makers from a company using Perplexity API
@@ -521,14 +594,16 @@ Return ONLY the JSON array, no additional text."""
             conn.commit()
             return {'saved': saved_count, 'skipped': skipped_count, 'total': saved_count + skipped_count}
 
-    def run_full_scraping_job(self, icp_description: str, job_id: int = None, user_id: int = None) -> Dict:
+    def run_full_scraping_job(self, icp_description: str, job_id: int = None, user_id: int = None, lead_type: str = 'B2B') -> Dict:
         """
-        Run complete scraping job: ICP -> Companies -> Decision Makers -> Email Patterns -> Verification
+        Run complete scraping job: ICP -> Companies -> Decision Makers -> Email Patterns -> Verification (B2B)
+        OR ICP -> Individual People -> Email Patterns -> Verification (B2C)
         
         Args:
             icp_description: ICP description
             job_id: Optional job ID (if None, creates new job)
             user_id: User ID for multi-tenant support
+            lead_type: 'B2B' (companies + decision makers) or 'B2C' (individual people)
         """
         # Check if using Supabase
         if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
@@ -539,9 +614,14 @@ Return ONLY the JSON array, no additional text."""
                 # Update existing job
                 self.db.update_scraping_job(job_id, status='running', current_step='Starting...', progress_percent=0)
                 
-                # Get user_id from job if not provided
+                # Get user_id and lead_type from job if not provided
                 if user_id is None:
                     user_id = self.db.get_scraping_job_user_id(job_id)
+                
+                # Get lead_type from job if not provided
+                if not lead_type or lead_type == 'B2B':
+                    job_data = self.db.get_scraping_job(job_id) if hasattr(self.db, 'get_scraping_job') else {}
+                    lead_type = job_data.get('lead_type', 'B2B') if job_data else 'B2B'
         else:
             # SQLite
             conn = self.db.connect()
@@ -585,10 +665,19 @@ Return ONLY the JSON array, no additional text."""
                 """, (job_id,))
                 conn.commit()
             
-            # Step 1: Extract companies
-            print("Step 1: Extracting companies from ICP...")
+            # Step 1: Extract companies (B2B) or individuals (B2C)
+            if lead_type == 'B2B':
+                print("Step 1: Extracting companies from ICP (B2B mode)...")
             companies = self.extract_companies_from_icp(icp_description)
             print(f"Found {len(companies)} companies")
+            else:
+                print("Step 1: Extracting individual people from ICP (B2C mode)...")
+                individuals = self.extract_individuals_from_icp(icp_description)
+                print(f"Found {len(individuals)} individuals")
+                # Convert individuals to company-like structure for processing
+                companies = [{'name': ind.get('name', ''), 'domain': ind.get('domain', ''), 
+                             'industry': ind.get('profession', ''), 'size': '1', 
+                             'is_individual': True, 'individual_data': ind} for ind in individuals]
             
             # Update progress: Companies found
             if use_supabase:
@@ -601,10 +690,25 @@ Return ONLY the JSON array, no additional text."""
                 """, (len(companies), job_id))
                 conn.commit()
 
-            # Step 2: Extract decision makers for each company
+            # Step 2: Extract decision makers for each company (B2B) or process individuals (B2C)
             all_leads = []
             total_companies = len(companies)
             for idx, company in enumerate(companies):
+                # Check if this is an individual (B2C)
+                if company.get('is_individual'):
+                    individual = company.get('individual_data', {})
+                    # Create lead directly from individual
+                    lead = {
+                        'name': individual.get('name', ''),
+                        'email': individual.get('email', ''),
+                        'title': individual.get('title', '') or individual.get('profession', ''),
+                        'company_name': individual.get('company', '') or individual.get('institution', ''),
+                        'domain': individual.get('domain', ''),
+                        'source': 'B2C Scraping'
+                    }
+                    all_leads.append(lead)
+                    continue
+                
                 company_name = company.get('name', '')
                 company_domain = company.get('domain', '')
 

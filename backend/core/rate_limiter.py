@@ -65,24 +65,43 @@ class RateLimiter:
         Returns:
             Dictionary with can_send, remaining, reset_time
         """
-        conn = self.db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         
-        # Get SMTP server info
-        cursor.execute("""
-            SELECT id, username, provider_type, daily_sent_count, last_sent_date, max_per_hour
-            FROM smtp_servers WHERE id = ?
-        """, (smtp_server_id,))
-        row = cursor.fetchone()
+        if use_supabase:
+            # Get SMTP server info from Supabase
+            result = self.db.supabase.client.table('smtp_servers').select(
+                'id, username, provider_type, daily_sent_count, last_sent_date, max_per_hour'
+            ).eq('id', smtp_server_id).execute()
+            
+            if not result.data or len(result.data) == 0:
+                return {
+                    'can_send': False,
+                    'reason': 'SMTP server not found',
+                    'remaining': 0
+                }
+            
+            server = result.data[0]
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT id, username, provider_type, daily_sent_count, last_sent_date, max_per_hour
+                FROM smtp_servers WHERE id = ?
+            """, (smtp_server_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return {
+                    'can_send': False,
+                    'reason': 'SMTP server not found',
+                    'remaining': 0
+                }
+            
+            server = dict(row)
         
-        if not row:
-            return {
-                'can_send': False,
-                'reason': 'SMTP server not found',
-                'remaining': 0
-            }
-        
-        server = dict(row)
         provider = provider_type or server.get('provider_type', 'smtp')
         if provider == 'smtp':
             # Detect from username
@@ -95,11 +114,14 @@ class RateLimiter:
         # Check daily limit
         today = date.today()
         last_sent_date = server.get('last_sent_date')
-        daily_sent = server.get('daily_sent_count', 0)
+        daily_sent = server.get('daily_sent_count', 0) or 0
         
         if last_sent_date:
             if isinstance(last_sent_date, str):
-                last_sent_date = datetime.fromisoformat(last_sent_date).date()
+                try:
+                    last_sent_date = datetime.fromisoformat(last_sent_date.replace('Z', '+00:00')).date()
+                except:
+                    last_sent_date = None
             elif isinstance(last_sent_date, date):
                 pass
             else:
@@ -108,12 +130,18 @@ class RateLimiter:
         # Reset daily count if new day
         if not last_sent_date or last_sent_date < today:
             daily_sent = 0
-            cursor.execute("""
-                UPDATE smtp_servers 
-                SET daily_sent_count = 0, last_sent_date = ?
-                WHERE id = ?
-            """, (today, smtp_server_id))
-            conn.commit()
+            if use_supabase:
+                self.db.supabase.client.table('smtp_servers').update({
+                    'daily_sent_count': 0,
+                    'last_sent_date': today.isoformat()
+                }).eq('id', smtp_server_id).execute()
+            else:
+                cursor.execute("""
+                    UPDATE smtp_servers 
+                    SET daily_sent_count = 0, last_sent_date = ?
+                    WHERE id = ?
+                """, (today, smtp_server_id))
+                conn.commit()
         
         # Check if daily limit reached
         if daily_sent >= daily_limit:
@@ -139,28 +167,72 @@ class RateLimiter:
     
     def increment_sent_count(self, smtp_server_id: int):
         """Increment sent count for SMTP server"""
-        conn = self.db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         today = date.today()
         
-        cursor.execute("""
-            UPDATE smtp_servers 
-            SET daily_sent_count = daily_sent_count + 1,
-                last_sent_date = ?
-            WHERE id = ?
-        """, (today, smtp_server_id))
-        conn.commit()
+        if use_supabase:
+            # Get current count
+            result = self.db.supabase.client.table('smtp_servers').select('daily_sent_count').eq('id', smtp_server_id).execute()
+            current_count = 0
+            if result.data and len(result.data) > 0:
+                current_count = result.data[0].get('daily_sent_count', 0) or 0
+            
+            # Update
+            self.db.supabase.client.table('smtp_servers').update({
+                'daily_sent_count': current_count + 1,
+                'last_sent_date': today.isoformat()
+            }).eq('id', smtp_server_id).execute()
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE smtp_servers 
+                SET daily_sent_count = daily_sent_count + 1,
+                    last_sent_date = ?
+                WHERE id = ?
+            """, (today, smtp_server_id))
+            conn.commit()
     
     def reset_daily_counts(self):
         """Reset daily counts for all servers (called daily)"""
-        conn = self.db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         today = date.today()
         
-        cursor.execute("""
-            UPDATE smtp_servers 
-            SET daily_sent_count = 0, last_sent_date = ?
-            WHERE last_sent_date < ? OR last_sent_date IS NULL
-        """, (today, today))
-        conn.commit()
+        if use_supabase:
+            # Get all servers with old dates
+            result = self.db.supabase.client.table('smtp_servers').select('id, last_sent_date').execute()
+            if result.data:
+                for server in result.data:
+                    last_date = server.get('last_sent_date')
+                    should_reset = False
+                    if not last_date:
+                        should_reset = True
+                    elif isinstance(last_date, str):
+                        try:
+                            last_date_obj = datetime.fromisoformat(last_date.replace('Z', '+00:00')).date()
+                            if last_date_obj < today:
+                                should_reset = True
+                        except:
+                            should_reset = True
+                    
+                    if should_reset:
+                        self.db.supabase.client.table('smtp_servers').update({
+                            'daily_sent_count': 0,
+                            'last_sent_date': today.isoformat()
+                        }).eq('id', server['id']).execute()
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE smtp_servers 
+                SET daily_sent_count = 0, last_sent_date = ?
+                WHERE last_sent_date < ? OR last_sent_date IS NULL
+            """, (today, today))
+            conn.commit()
 

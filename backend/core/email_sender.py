@@ -144,11 +144,12 @@ class EmailSender:
                 
                 if queue_item:
                     print(f"[{thread_name}] Processing email for {queue_item.get('email', 'unknown')}")
-                    # Get campaign personalization setting
-                    conn = self.db.connect()
-                    cursor = conn.cursor()
-                    # Get campaign details including personalization (if not already in queue_item from JOIN)
+                    
+                    # Get campaign personalization setting (if not already in queue_item from JOIN)
                     if 'use_personalization' not in queue_item:
+                        # Check if using Supabase FIRST before trying to use SQLite methods
+                        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
+                        
                         if use_supabase:
                             result = self.db.supabase.client.table('campaigns').select('use_personalization, personalization_prompt, user_id').eq('id', queue_item.get('campaign_id')).execute()
                             if result.data and len(result.data) > 0:
@@ -157,6 +158,9 @@ class EmailSender:
                                 queue_item['personalization_prompt'] = camp.get('personalization_prompt')
                                 queue_item['campaign_user_id'] = camp.get('user_id')
                         else:
+                            # SQLite
+                            conn = self.db.connect()
+                            cursor = conn.cursor()
                             cursor.execute("SELECT use_personalization, personalization_prompt, user_id FROM campaigns WHERE id = ?", (queue_item.get('campaign_id'),))
                             row = cursor.fetchone()
                             if row:
@@ -167,6 +171,8 @@ class EmailSender:
                         # Convert use_personalization to boolean if it's an integer
                         if isinstance(queue_item.get('use_personalization'), int):
                             queue_item['use_personalization'] = bool(queue_item['use_personalization'])
+                    
+                    # Send the email
                     self.send_email(queue_item)
                     print(f"[{thread_name}] Waiting {self.interval} seconds before next email...")
                     time.sleep(self.interval)
@@ -183,61 +189,208 @@ class EmailSender:
     def get_next_queue_item(self):
         """Get next item from email queue - with locking to prevent duplicates"""
         try:
-            conn = self.db.connect()
-            cursor = conn.cursor()
+            # Check if using Supabase FIRST before trying to use SQLite methods
+            use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
             
-            # Use a transaction with row-level locking to prevent duplicate processing
-            # First, find and lock a pending item
-            # First, get queue items with valid SMTP server assignments
-            # We need to ensure the SMTP server exists and is active
-            cursor.execute("""
-                SELECT eq.id as queue_id, eq.campaign_id, eq.recipient_id, eq.smtp_server_id,
-                       c.name as campaign_name, c.subject, c.sender_name, c.sender_email, 
-                       c.reply_to, c.html_content, c.use_personalization, c.personalization_prompt, c.user_id,
-                       r.email, r.first_name, r.last_name, r.company, r.city, r.is_unsubscribed,
-                       s.host, s.port, s.username, s.password, s.use_tls, s.use_ssl, s.is_active
-                FROM email_queue eq
-                JOIN campaigns c ON eq.campaign_id = c.id
-                JOIN recipients r ON eq.recipient_id = r.id
-                INNER JOIN smtp_servers s ON eq.smtp_server_id = s.id
-                WHERE eq.status = 'pending' 
-                  AND r.is_unsubscribed = 0 
-                  AND s.is_active = 1 
-                  AND s.password IS NOT NULL 
-                  AND s.password != ''
-                  AND eq.smtp_server_id IS NOT NULL
-                ORDER BY eq.smtp_server_id ASC, eq.priority DESC, eq.created_at ASC
-                LIMIT 1
-            """)
-            
-            row = cursor.fetchone()
-            if row:
-                queue_item = dict(row)
-                queue_id = queue_item['queue_id']
+            if use_supabase:
+                # Supabase: Get pending queue items with joins
+                # First, get pending queue items (will filter nulls and inactive SMTP in Python)
+                queue_result = self.db.supabase.client.table('email_queue').select(
+                    'id, campaign_id, recipient_id, smtp_server_id, status, priority, created_at'
+                ).eq('status', 'pending').order('created_at', desc=False).limit(100).execute()
                 
-                # CRITICAL: Immediately mark as 'processing' to prevent duplicate processing
-                # Use UPDATE with WHERE status='pending' to ensure atomic operation
-                cursor.execute("""
-                    UPDATE email_queue 
-                    SET status = 'processing' 
-                    WHERE id = ? AND status = 'pending'
-                """, (queue_id,))
+                # Filter for non-null smtp_server_id in Python
+                pending_queues = []
+                if queue_result.data:
+                    pending_queues = [q for q in queue_result.data if q.get('smtp_server_id') is not None]
                 
-                if cursor.rowcount == 0:
-                    # Another thread already picked this up, return None
-                    conn.rollback()
+                if not pending_queues:
                     return None
                 
-                conn.commit()
-                smtp_id = queue_item.get('smtp_server_id')
-                smtp_username = queue_item.get('username', 'N/A')
-                print(f"[{threading.current_thread().name}] Locked queue item {queue_id} for processing")
-                print(f"   Using SMTP Server ID: {smtp_id}, Username: {smtp_username}")
+                # Sort by smtp_server_id, priority desc, created_at
+                pending_queues.sort(key=lambda x: (
+                    x.get('smtp_server_id', 0),
+                    -x.get('priority', 0),
+                    x.get('created_at', '')
+                ))
                 
-                # Return the queue item
-                return queue_item
-            
-            return None
+                # Try to process each queue item until one is successfully locked
+                for queue_row in pending_queues:
+                    queue_id = queue_row['id']
+                    campaign_id = queue_row['campaign_id']
+                    recipient_id = queue_row['recipient_id']
+                    smtp_server_id = queue_row['smtp_server_id']
+                    
+                    # Try to mark as processing atomically (use update with filter to prevent race condition)
+                    try:
+                        update_result = self.db.supabase.client.table('email_queue').update({'status': 'processing'}).eq('id', queue_id).eq('status', 'pending').execute()
+                        if not update_result.data or len(update_result.data) == 0:
+                            # Another thread already picked this up, try next
+                            continue
+                    except:
+                        # Race condition - another thread got it, try next
+                        continue
+                    
+                    # Get campaign data
+                    camp_result = self.db.supabase.client.table('campaigns').select(
+                        'name, subject, sender_name, sender_email, reply_to, html_content, use_personalization, personalization_prompt, user_id'
+                    ).eq('id', campaign_id).execute()
+                    
+                    if not camp_result.data or len(camp_result.data) == 0:
+                        # Mark as failed and try next
+                        self.db.supabase.client.table('email_queue').update({'status': 'failed', 'error_message': 'Campaign not found'}).eq('id', queue_id).execute()
+                        continue
+                    
+                    campaign = camp_result.data[0]
+                    
+                    # Get recipient data
+                    rec_result = self.db.supabase.client.table('recipients').select(
+                        'email, first_name, last_name, company, city, is_unsubscribed'
+                    ).eq('id', recipient_id).execute()
+                    
+                    if not rec_result.data or len(rec_result.data) == 0:
+                        # Mark as failed and try next
+                        self.db.supabase.client.table('email_queue').update({'status': 'failed', 'error_message': 'Recipient not found'}).eq('id', queue_id).execute()
+                        continue
+                    
+                    recipient = rec_result.data[0]
+                    
+                    # Check if unsubscribed
+                    if recipient.get('is_unsubscribed'):
+                        self.db.supabase.client.table('email_queue').update({'status': 'skipped', 'error_message': 'Recipient unsubscribed'}).eq('id', queue_id).execute()
+                        continue
+                    
+                    # Get SMTP server data (including IMAP settings for sent folder)
+                    smtp_result = self.db.supabase.client.table('smtp_servers').select(
+                        'host, port, username, password, use_tls, use_ssl, is_active, imap_host, imap_port, save_to_sent'
+                    ).eq('id', smtp_server_id).eq('is_active', 1).execute()
+                    
+                    # Filter for non-null password in Python
+                    smtp_servers_list = []
+                    if smtp_result.data:
+                        smtp_servers_list = [s for s in smtp_result.data if s.get('password') and s.get('password').strip()]
+                    
+                    if not smtp_servers_list:
+                        # Mark as failed and try next
+                        self.db.supabase.client.table('email_queue').update({'status': 'failed', 'error_message': 'SMTP server password missing or inactive'}).eq('id', queue_id).execute()
+                        continue
+                    
+                    smtp_server = smtp_servers_list[0]
+                    
+                    # CRITICAL: Decrypt password before adding to queue_item
+                    password = smtp_server.get('password', '')
+                    if password:
+                        try:
+                            from core.encryption import get_encryption_manager
+                            encryptor = get_encryption_manager()
+                            try:
+                                decrypted = encryptor.decrypt(password)
+                                if decrypted:
+                                    password = decrypted
+                            except:
+                                # Password might be plaintext, use as-is
+                                pass
+                        except Exception as decrypt_error:
+                            # Encryption manager not available or password is plaintext
+                            pass
+                    
+                    # Ensure password is a string
+                    if isinstance(password, bytes):
+                        password = password.decode('utf-8')
+                    
+                    # Build queue_item dict
+                    queue_item = {
+                        'queue_id': queue_id,
+                        'campaign_id': campaign_id,
+                        'recipient_id': recipient_id,
+                        'smtp_server_id': smtp_server_id,
+                        'campaign_name': campaign.get('name', ''),
+                        'subject': campaign.get('subject', ''),
+                        'sender_name': campaign.get('sender_name', ''),
+                        'sender_email': campaign.get('sender_email', ''),
+                        'reply_to': campaign.get('reply_to'),
+                        'html_content': campaign.get('html_content', ''),
+                        'use_personalization': campaign.get('use_personalization', False),
+                        'personalization_prompt': campaign.get('personalization_prompt'),
+                        'user_id': campaign.get('user_id'),
+                        'email': recipient.get('email', ''),
+                        'first_name': recipient.get('first_name', ''),
+                        'last_name': recipient.get('last_name', ''),
+                        'company': recipient.get('company', ''),
+                        'city': recipient.get('city', ''),
+                        'is_unsubscribed': recipient.get('is_unsubscribed', False),
+                        'host': smtp_server.get('host', ''),
+                        'port': smtp_server.get('port', 465),
+                        'username': smtp_server.get('username', ''),
+                        'password': password,  # Use decrypted password
+                        'use_tls': smtp_server.get('use_tls', False),
+                        'use_ssl': smtp_server.get('use_ssl', False),
+                        'is_active': smtp_server.get('is_active', True),
+                        'imap_host': smtp_server.get('imap_host'),  # For saving to sent folder
+                        'imap_port': smtp_server.get('imap_port', 993),
+                        'save_to_sent': smtp_server.get('save_to_sent', 1)
+                    }
+                    
+                    smtp_username = queue_item.get('username', 'N/A')
+                    print(f"[{threading.current_thread().name}] Locked queue item {queue_id} for processing")
+                    print(f"   Using SMTP Server ID: {smtp_server_id}, Username: {smtp_username}")
+                    
+                    return queue_item
+                
+                # If we get here, none of the queue items could be processed
+                return None
+            else:
+                # SQLite
+                conn = self.db.connect()
+                cursor = conn.cursor()
+                
+                # Use a transaction with row-level locking to prevent duplicate processing
+                cursor.execute("""
+                    SELECT eq.id as queue_id, eq.campaign_id, eq.recipient_id, eq.smtp_server_id,
+                           c.name as campaign_name, c.subject, c.sender_name, c.sender_email, 
+                           c.reply_to, c.html_content, c.use_personalization, c.personalization_prompt, c.user_id,
+                           r.email, r.first_name, r.last_name, r.company, r.city, r.is_unsubscribed,
+                           s.host, s.port, s.username, s.password, s.use_tls, s.use_ssl, s.is_active
+                    FROM email_queue eq
+                    JOIN campaigns c ON eq.campaign_id = c.id
+                    JOIN recipients r ON eq.recipient_id = r.id
+                    INNER JOIN smtp_servers s ON eq.smtp_server_id = s.id
+                    WHERE eq.status = 'pending' 
+                      AND r.is_unsubscribed = 0 
+                      AND s.is_active = 1 
+                      AND s.password IS NOT NULL 
+                      AND s.password != ''
+                      AND eq.smtp_server_id IS NOT NULL
+                    ORDER BY eq.smtp_server_id ASC, eq.priority DESC, eq.created_at ASC
+                    LIMIT 1
+                """)
+                
+                row = cursor.fetchone()
+                if row:
+                    queue_item = dict(row)
+                    queue_id = queue_item['queue_id']
+                    
+                    # CRITICAL: Immediately mark as 'processing' to prevent duplicate processing
+                    cursor.execute("""
+                        UPDATE email_queue 
+                        SET status = 'processing' 
+                        WHERE id = ? AND status = 'pending'
+                    """, (queue_id,))
+                    
+                    if cursor.rowcount == 0:
+                        # Another thread already picked this up, return None
+                        conn.rollback()
+                        return None
+                    
+                    conn.commit()
+                    smtp_id = queue_item.get('smtp_server_id')
+                    smtp_username = queue_item.get('username', 'N/A')
+                    print(f"[{threading.current_thread().name}] Locked queue item {queue_id} for processing")
+                    print(f"   Using SMTP Server ID: {smtp_id}, Username: {smtp_username}")
+                    
+                    return queue_item
+                
+                return None
         except Exception as e:
             import traceback
             print(f"Error getting queue item: {e}")
@@ -300,15 +453,38 @@ class EmailSender:
             
             # First try to use SMTP config from the JOIN (most reliable)
             if queue_item.get('host') and queue_item.get('password') and queue_item.get('username'):
+                # CRITICAL: Decrypt password if it's encrypted
+                password = queue_item['password']
+                if password:
+                    try:
+                        from core.encryption import get_encryption_manager
+                        encryptor = get_encryption_manager()
+                        # Try to decrypt - if it fails, it might be plaintext
+                        try:
+                            decrypted = encryptor.decrypt(password)
+                            if decrypted:
+                                password = decrypted
+                        except:
+                            # Password might be plaintext, use as-is
+                            pass
+                    except Exception as decrypt_error:
+                        # Encryption manager not available or password is plaintext
+                        pass
+                
+                # Ensure password is a string
+                if isinstance(password, bytes):
+                    password = password.decode('utf-8')
+                
                 smtp_config = {
                     'host': queue_item['host'],
                     'port': queue_item['port'],
                     'username': queue_item['username'],
-                    'password': queue_item['password'],
+                    'password': password,  # Use decrypted password
                     'use_ssl': queue_item.get('use_ssl', 0),
                     'use_tls': queue_item.get('use_tls', 0)
                 }
                 print(f"   Using SMTP config from queue JOIN: {queue_item.get('username')} @ {queue_item.get('host')}")
+                print(f"   Password decrypted: {bool(password and len(password) > 0)}")
             elif queue_smtp_id:
                 # Fallback: fetch SMTP config using the queue's smtp_server_id
                 print(f"   Fetching SMTP config for server ID: {queue_smtp_id}")
@@ -444,12 +620,32 @@ class EmailSender:
                 
                 # Try authentication - some servers are picky about the method
                 auth_success = False
+                auth_exception = None
                 try:
                     # Standard login - this should work for most servers
+                    # CRITICAL: Ensure password is a string, not bytes
+                    if isinstance(smtp_password, bytes):
+                        smtp_password = smtp_password.decode('utf-8')
+                    
                     server.login(smtp_username, smtp_password)
                     auth_success = True
                     print(f"✓ Authenticated successfully as {smtp_username}")
+                    
+                    # Verify authentication by checking server state
+                    try:
+                        # Try a NOOP command to verify connection is still authenticated
+                        server.noop()
+                    except:
+                        print("⚠ Warning: Connection may have been reset after login")
+                        # Re-authenticate if needed
+                        try:
+                            server.login(smtp_username, smtp_password)
+                            auth_success = True
+                        except:
+                            auth_success = False
+                            
                 except smtplib.SMTPAuthenticationError as auth_error:
+                    auth_exception = auth_error
                     error_msg = f"Authentication failed: {str(auth_error)}"
                     print(f"✗ {error_msg}")
                     print(f"  Username: {smtp_username}")
@@ -457,20 +653,111 @@ class EmailSender:
                     print(f"  Error code: {getattr(auth_error, 'smtp_code', 'N/A')}")
                     print(f"  Error message: {getattr(auth_error, 'smtp_error', 'N/A')}")
                     
-                    # Try alternative authentication if AUTH PLAIN is available
-                    if not auth_success and 'PLAIN' in auth_methods:
-                        try:
-                            print("  Trying AUTH PLAIN method...")
-                            import base64
-                            auth_string = base64.b64encode(f"\0{smtp_username}\0{smtp_password}".encode()).decode()
-                            server.docmd('AUTH', 'PLAIN ' + auth_string)
-                            auth_success = True
-                            print(f"✓ Authenticated successfully using AUTH PLAIN")
-                        except Exception as plain_error:
-                            print(f"  AUTH PLAIN also failed: {plain_error}")
+                    # Try alternative authentication methods
+                    if not auth_success:
+                        # Try AUTH PLAIN if available - use smtplib's auth() method for proper state management
+                        if 'PLAIN' in auth_methods:
+                            try:
+                                print("  Trying AUTH PLAIN method...")
+                                if isinstance(smtp_password, bytes):
+                                    smtp_password = smtp_password.decode('utf-8')
+                                
+                                # Use smtplib's auth() method which properly sets internal state
+                                # This ensures sendmail() recognizes we're authenticated
+                                try:
+                                    # For SMTP_SSL and SMTP, try auth() method first
+                                    if hasattr(server, 'auth'):
+                                        # Create auth mechanism
+                                        import base64
+                                        auth_string = base64.b64encode(f"\0{smtp_username}\0{smtp_password}".encode()).decode()
+                                    # Use auth() method with PLAIN mechanism
+                                    # The auth() method expects a callable that returns credentials
+                                    def plain_auth():
+                                        return (smtp_username, smtp_password)
+                                    server.auth('PLAIN', plain_auth)
+                                    auth_success = True
+                                    print(f"✓ Authenticated successfully using AUTH PLAIN (via auth())")
+                                except (AttributeError, Exception) as auth_method_error:
+                                    # Fallback: use docmd() and manually set state
+                                    print(f"  auth() method failed, trying docmd(): {auth_method_error}")
+                                    import base64
+                                    auth_string = base64.b64encode(f"\0{smtp_username}\0{smtp_password}".encode()).decode()
+                                    response = server.docmd('AUTH', 'PLAIN ' + auth_string)
+                                    if response and len(response) > 0 and response[0] == 235:
+                                        auth_success = True
+                                        print(f"✓ Authenticated successfully using AUTH PLAIN (via docmd)")
+                                        # Manually set authenticated state for smtplib
+                                        # This is critical - docmd doesn't update smtplib's internal state
+                                        try:
+                                            # Set internal authentication flags
+                                            if hasattr(server, '_auth_object'):
+                                                server._auth_object = True
+                                            # Mark as authenticated in esmtp_features
+                                            if hasattr(server, 'esmtp_features'):
+                                                if 'auth' not in server.esmtp_features:
+                                                    server.esmtp_features['auth'] = []
+                                            # Set a flag that login was successful
+                                            if hasattr(server, '_login'):
+                                                server._login = True
+                                            # For SMTP_SSL, we need to ensure it knows we're authenticated
+                                            if hasattr(server, 'sock') and hasattr(server, '_auth_challenge'):
+                                                server._auth_challenge = None
+                                        except Exception as state_error:
+                                            print(f"⚠ Could not set auth state: {state_error}")
+                                            # Still continue - server accepted auth
+                                    else:
+                                        print(f"  AUTH PLAIN failed with response: {response}")
+                                
+                                if auth_success:
+                                    # Verify authentication works
+                                    try:
+                                        noop_resp = server.noop()
+                                        if noop_resp and len(noop_resp) > 0 and noop_resp[0] == 250:
+                                            print(f"✓ Authentication verified (NOOP: {noop_resp[0]})")
+                                        else:
+                                            print(f"⚠ NOOP returned unexpected response: {noop_resp}")
+                                    except Exception as verify_err:
+                                        print(f"⚠ Could not verify authentication state: {verify_err}")
+                            except Exception as plain_error:
+                                print(f"  AUTH PLAIN also failed: {plain_error}")
+                                import traceback
+                                traceback.print_exc()
+                        
+                        # Try AUTH LOGIN if available
+                        if not auth_success and 'LOGIN' in auth_methods:
+                            try:
+                                print("  Trying AUTH LOGIN method...")
+                                if isinstance(smtp_password, bytes):
+                                    smtp_password = smtp_password.decode('utf-8')
+                                
+                                # Try smtplib's auth() method first
+                                try:
+                                    server.auth('LOGIN', lambda: (smtp_username, smtp_password))
+                                    auth_success = True
+                                    print(f"✓ Authenticated successfully using AUTH LOGIN (via auth())")
+                                except (AttributeError, Exception):
+                                    # Fallback to docmd
+                                    import base64
+                                    response1 = server.docmd('AUTH', 'LOGIN')
+                                    if response1 and len(response1) > 0 and response1[0] == 334:
+                                        response2 = server.docmd(base64.b64encode(smtp_username.encode()).decode())
+                                        if response2 and len(response2) > 0 and response2[0] == 334:
+                                            response3 = server.docmd(base64.b64encode(smtp_password.encode()).decode())
+                                            if response3 and len(response3) > 0 and response3[0] == 235:
+                                                auth_success = True
+                                                print(f"✓ Authenticated successfully using AUTH LOGIN (via docmd)")
+                                                if hasattr(server, '_auth_object'):
+                                                    server._auth_object = True
+                            except Exception as login_error:
+                                print(f"  AUTH LOGIN also failed: {login_error}")
+                                import traceback
+                                traceback.print_exc()
                     
                     if not auth_success:
-                        self.mark_failed(queue_item['queue_id'], error_msg)
+                        # Final error with detailed info
+                        final_error = f"SMTP Authentication failed. Server requires authentication. Check username and password. Error: {str(auth_exception) if auth_exception else 'Unknown error'}"
+                        print(f"✗ {final_error}")
+                        self.mark_failed(queue_item['queue_id'], final_error)
                         try:
                             server.quit()
                         except:
@@ -513,30 +800,164 @@ class EmailSender:
                 # The From header in the message can be different, but envelope must match auth
                 to_email = recipient['email']
                 
+                # CRITICAL: Ensure authentication is still valid before sending
+                # Some servers require re-authentication if connection is idle
+                # For servers that use AUTH PLAIN via docmd, we need to be more careful
+                try:
+                    # Verify connection is still alive and authenticated
+                    noop_response = server.noop()
+                    if noop_response and len(noop_response) > 0:
+                        if noop_response[0] != 250:
+                            raise Exception(f"Connection not properly authenticated (NOOP: {noop_response[0]})")
+                        print(f"✓ Connection verified (NOOP: {noop_response[0]})")
+                    else:
+                        raise Exception("NOOP returned empty response")
+                except Exception as verify_error:
+                    # Connection lost or not authenticated, re-authenticate
+                    print(f"⚠ Connection verification failed, re-authenticating: {verify_error}")
+                    auth_success = False
+                    try:
+                        if isinstance(smtp_password, bytes):
+                            smtp_password = smtp_password.decode('utf-8')
+                        # Try standard login first
+                        try:
+                            server.login(smtp_username, smtp_password)
+                            auth_success = True
+                            print("✓ Re-authenticated successfully with login()")
+                        except:
+                            # Try AUTH PLAIN
+                            try:
+                                import base64
+                                auth_string = base64.b64encode(f"\0{smtp_username}\0{smtp_password}".encode()).decode()
+                                response = server.docmd('AUTH', 'PLAIN ' + auth_string)
+                                if response[0] == 235:
+                                    auth_success = True
+                                    print("✓ Re-authenticated successfully with AUTH PLAIN")
+                            except:
+                                pass
+                        
+                        if not auth_success:
+                            raise Exception("Re-authentication failed")
+                    except Exception as reauth_error:
+                        error_msg = f"Re-authentication failed: {str(reauth_error)}"
+                        print(f"✗ {error_msg}")
+                        self.mark_failed(queue_item['queue_id'], error_msg)
+                        try:
+                            server.quit()
+                        except:
+                            pass
+                        return
+                
                 # Use sendmail with authenticated email as envelope sender
                 # This prevents bounces due to authentication mismatches
+                # IMPORTANT: Use smtp_username as envelope sender (MAIL FROM) to match authentication
+                # For some servers, we need to explicitly set MAIL FROM to the authenticated user
+                
+                # Ensure the From header in the message matches the authenticated user
+                # This is critical for servers that check authentication
+                if msg['From'] and smtp_username:
+                    # Extract email from From header
+                    from_header = msg['From']
+                    # If From doesn't match authenticated user, update it
+                    if smtp_username not in from_header:
+                        # Keep the display name but use authenticated email
+                        from_name = from_header.split('<')[0].strip().strip('"')
+                        if from_name:
+                            msg['From'] = f'"{from_name}" <{smtp_username}>'
+                        else:
+                            msg['From'] = smtp_username
+                
+                # Send email - use smtp_username as envelope sender (MAIL FROM)
+                # CRITICAL: For servers that require authentication, ensure we're authenticated
+                # Some servers check authentication state before allowing sendmail
                 try:
-                    server.sendmail(smtp_username, [to_email], msg.as_string())
-                    print(f"✓ Email sent successfully to {to_email} from {smtp_username} (SMTP Server ID: {queue_item.get('smtp_server_id')})")
+                    # Verify we're still authenticated before sending
+                    noop_check = server.noop()
+                    if noop_check and len(noop_check) > 0 and noop_check[0] != 250:
+                        raise Exception("Not authenticated - NOOP failed")
+                except Exception as auth_check_error:
+                    print(f"⚠ Authentication check failed before send: {auth_check_error}")
+                    # Try to re-authenticate
+                    try:
+                        if isinstance(smtp_password, bytes):
+                            smtp_password = smtp_password.decode('utf-8')
+                        server.login(smtp_username, smtp_password)
+                        print("✓ Re-authenticated before sending")
+                    except:
+                        # If login fails, try AUTH PLAIN again
+                        try:
+                            import base64
+                            auth_string = base64.b64encode(f"\0{smtp_username}\0{smtp_password}".encode()).decode()
+                            response = server.docmd('AUTH', 'PLAIN ' + auth_string)
+                            if response and len(response) > 0 and response[0] == 235:
+                                print("✓ Re-authenticated with AUTH PLAIN before sending")
+                                # Set auth state again
+                                if hasattr(server, '_auth_object'):
+                                    server._auth_object = True
+                            else:
+                                raise Exception("Re-authentication failed")
+                        except Exception as reauth_error:
+                            error_msg = f"Failed to re-authenticate before sending: {reauth_error}"
+                            print(f"✗ {error_msg}")
+                            self.mark_failed(queue_item['queue_id'], error_msg)
+                            server.quit()
+                            return
+                
+                # Now send the email - verify it actually succeeds
+                try:
+                    # sendmail returns a dict of failed recipients (empty dict = success)
+                    failed_recipients = server.sendmail(smtp_username, [to_email], msg.as_string())
+                    if failed_recipients:
+                        # Some recipients failed
+                        error_msg = f"SMTP sendmail returned failed recipients: {failed_recipients}"
+                        print(f"✗ {error_msg}")
+                        self.mark_failed(queue_item['queue_id'], error_msg)
+                        server.quit()
+                        return
+                    else:
+                        # Success - no failed recipients
+                        print(f"✓ Email sent successfully to {to_email} from {smtp_username} (SMTP Server ID: {queue_item.get('smtp_server_id')})")
+                        print(f"✓ SMTP sendmail() returned empty dict (all recipients accepted)")
                 except smtplib.SMTPRecipientsRefused as e:
-                    error_msg = f"Recipient refused: {str(e)}"
+                    error_msg = f"Recipient refused by SMTP server: {str(e)}"
                     print(f"✗ {error_msg}")
                     self.mark_failed(queue_item['queue_id'], error_msg)
                     server.quit()
                     return
                 except smtplib.SMTPDataError as e:
-                    error_msg = f"SMTP data error: {str(e)}"
+                    error_msg = f"SMTP data error during send: {str(e)}"
                     print(f"✗ {error_msg}")
                     self.mark_failed(queue_item['queue_id'], error_msg)
                     server.quit()
                     return
-                
+                except Exception as send_error:
+                    error_msg = f"Unexpected error during sendmail: {str(send_error)}"
+                    print(f"✗ {error_msg}")
+                    import traceback
+                    traceback.print_exc()
+                    self.mark_failed(queue_item['queue_id'], error_msg)
+                    server.quit()
+                    return
                 # Save email to IMAP Sent folder if configured (before quitting SMTP)
+                # This must happen AFTER successful sendmail() but BEFORE server.quit()
                 try:
-                    self.save_to_imap_sent(msg, smtp_config)
+                    # Ensure IMAP config is in smtp_config
+                    if not smtp_config.get('imap_host') and queue_item.get('imap_host'):
+                        smtp_config['imap_host'] = queue_item.get('imap_host')
+                        smtp_config['imap_port'] = queue_item.get('imap_port', 993)
+                        smtp_config['save_to_sent'] = queue_item.get('save_to_sent', 1)
+                    
+                    if smtp_config.get('imap_host') and smtp_config.get('save_to_sent', 1):
+                        print(f"📁 Saving email to IMAP Sent folder: {smtp_config.get('imap_host')}")
+                        self.save_to_imap_sent(msg, smtp_config)
+                        print(f"✓ Email saved to IMAP Sent folder")
+                    else:
+                        print(f"⚠ IMAP not configured or save_to_sent disabled - skipping IMAP save")
                 except Exception as imap_error:
                     print(f"⚠ Warning: Could not save to IMAP Sent folder: {imap_error}")
-                    # Don't fail the send if IMAP save fails
+                    import traceback
+                    traceback.print_exc()
+                    # Don't fail the send if IMAP save fails - email was already sent
                 
                 server.quit()
                 
@@ -557,15 +978,27 @@ class EmailSender:
                     'sender_email': campaign.get('sender_email', ''),
                     'html_content': campaign.get('html_content', '')
                 }
-                self.mark_sent(
-                    queue_item['queue_id'], 
-                    queue_item['campaign_id'], 
-                    queue_item['recipient_id'],
-                    email_message=msg,
-                    recipient_info=recipient_info,
-                    campaign_info=campaign_info,
-                    smtp_server_id=queue_item.get('smtp_server_id')
-                )
+                # Mark as sent - wrap in try-except to ensure status is updated even if this fails
+                try:
+                    self.mark_sent(
+                        queue_item['queue_id'], 
+                        queue_item['campaign_id'], 
+                        queue_item['recipient_id'],
+                        email_message=msg,
+                        recipient_info=recipient_info,
+                        campaign_info=campaign_info,
+                        smtp_server_id=queue_item.get('smtp_server_id')
+                    )
+                    print(f"✓ Email marked as sent in database (Queue ID: {queue_item['queue_id']})")
+                except Exception as mark_error:
+                    import traceback
+                    print(f"✗ CRITICAL: Failed to mark email as sent in database: {mark_error}")
+                    print(traceback.format_exc())
+                    # Try to at least update queue status to failed so it doesn't stay in processing
+                    try:
+                        self.mark_failed(queue_item['queue_id'], f"Error saving to database: {mark_error}")
+                    except:
+                        pass
                 
             except smtplib.SMTPAuthenticationError as auth_error:
                 error_msg = f"Authentication failed: {str(auth_error)}. Check username and password."
@@ -599,7 +1032,12 @@ class EmailSender:
             import traceback
             print(f"✗ Error sending email to {queue_item.get('email', 'unknown')}: {error_msg}")
             print(traceback.format_exc())
-            self.mark_failed(queue_item['queue_id'], error_msg)
+            # Ensure queue status is updated on any exception
+            try:
+                self.mark_failed(queue_item.get('queue_id'), error_msg)
+            except Exception as mark_error:
+                print(f"✗ CRITICAL: Failed to mark email as failed in queue: {mark_error}")
+                print(traceback.format_exc())
     
     def prepare_email(self, campaign, recipient, smtp_config, campaign_id=None, recipient_id=None, personalization_prompt=None):
         """Prepare email message with merge tags and optional LLM personalization"""
@@ -641,13 +1079,23 @@ class EmailSender:
         # Get HTML content
         html_content = campaign.get('html_content', '')
         
-        # Check if personalization is enabled for this campaign
-        # Check both campaign dict and queue_item
+        # Two email sending modes:
+        # 1. LLM Personalization Mode (use_personalization = True): Uses AI to personalize each email
+        # 2. Direct Mode (use_personalization = False): Uses template as-is with merge tags only
+        
         use_personalization = campaign.get('use_personalization', False)
         if not use_personalization:
             # Try to get from queue_item if passed separately
             use_personalization = getattr(self, '_current_queue_item', {}).get('use_personalization', False)
+        
+        # Convert to boolean if it's an integer
+        if isinstance(use_personalization, int):
+            use_personalization = bool(use_personalization)
+        
+        print(f"📧 Email Mode: {'LLM Personalization' if use_personalization else 'Direct (Template Only)'}")
+        
         if use_personalization:
+            # MODE 1: LLM Personalization - Use AI to personalize email content
             try:
                 from core.personalization import EmailPersonalizer
                 from core.quota_manager import QuotaManager
@@ -660,11 +1108,31 @@ class EmailSender:
                 
                 # Get recipient context
                 name = recipient.get('first_name', '') + ' ' + recipient.get('last_name', '')
-                company = recipient.get('company', '')
+                name = name.strip()
+                company = recipient.get('company', '') or recipient.get('company_name', '')
                 context = recipient.get('context', '')
                 
                 # Get custom prompt from campaign
                 custom_prompt = campaign.get('personalization_prompt')
+                
+                # Pre-process template: Replace merge tags with actual values before sending to LLM
+                # This helps the LLM understand the context better
+                template_for_personalization = html_content
+                if name:
+                    first_name = recipient.get('first_name', '') or (name.split()[0] if name.split() else name)
+                    template_for_personalization = template_for_personalization.replace('{{first_name}}', first_name)
+                    template_for_personalization = template_for_personalization.replace('{{name}}', name)
+                    template_for_personalization = template_for_personalization.replace('{first_name}', first_name)
+                    template_for_personalization = template_for_personalization.replace('{name}', name)
+                if company:
+                    template_for_personalization = template_for_personalization.replace('{{company}}', company)
+                    template_for_personalization = template_for_personalization.replace('{company}', company)
+                if recipient.get('email'):
+                    template_for_personalization = template_for_personalization.replace('{{email}}', recipient.get('email'))
+                    template_for_personalization = template_for_personalization.replace('{email}', recipient.get('email'))
+                if recipient.get('city'):
+                    template_for_personalization = template_for_personalization.replace('{{city}}', recipient.get('city'))
+                    template_for_personalization = template_for_personalization.replace('{city}', recipient.get('city'))
                 
                 # Track LLM usage start
                 quota_mgr = QuotaManager(self.db)
@@ -672,25 +1140,40 @@ class EmailSender:
                 
                 # Personalize the content (use prompt from parameter or campaign)
                 prompt_to_use = personalization_prompt or custom_prompt
+                print(f"🤖 Calling LLM personalization with pre-processed template")
+                print(f"   Original template length: {len(html_content)}")
+                print(f"   Pre-processed template length: {len(template_for_personalization)}")
+                
                 html_content = personalizer.personalize_email(
-                    html_content, 
-                    name.strip(), 
+                    template_for_personalization,  # Use pre-processed template
+                    name, 
                     company, 
                     context,
                     custom_prompt=prompt_to_use
                 )
                 
+                print(f"✓ LLM personalization completed, result length: {len(html_content)}")
+                
                 # Record LLM usage (tokens are already recorded in personalizer)
                 if user_id:
-                    obs_mgr.record_metric(user_id, 'llm', 'personalization_used', 1.0, {
-                        'campaign_id': campaign_id,
-                        'recipient_id': recipient_id
-                    })
+                    try:
+                        obs_mgr.record_metric(user_id, 'llm', 'personalization_used', 1.0, {
+                            'campaign_id': campaign_id,
+                            'recipient_id': recipient_id
+                        })
+                    except Exception as obs_error:
+                        # Don't fail email sending if metrics recording fails
+                        print(f"⚠ Warning: Could not record LLM metric: {obs_error}")
                     
             except Exception as e:
-                print(f"Warning: Personalization failed, using original template: {e}")
+                print(f"⚠️ Warning: LLM Personalization failed, falling back to direct template: {e}")
                 import traceback
                 traceback.print_exc()
+                # Continue with original html_content (fallback to direct mode)
+        else:
+            # MODE 2: Direct Mode - Use template as-is with merge tags only (no LLM)
+            # Merge tags like {{first_name}}, {{company}} will be replaced, but no AI personalization
+            print(f"✓ Direct Mode: Using template with merge tags only (no LLM)")
                 # Continue with original content
         
         # Extract attachment paths if embedded in HTML
@@ -956,9 +1439,9 @@ class EmailSender:
                     except:
                         # If decryption fails, might be plaintext from old data
                         password = server['password']
-                        if isinstance(password, bytes):
-                            password = password.decode('utf-8')
-                        server['password'] = password
+                    if isinstance(password, bytes):
+                        password = password.decode('utf-8')
+                    server['password'] = password
                 return server
             return None
         else:
@@ -978,9 +1461,9 @@ class EmailSender:
                     except:
                         # If decryption fails, might be plaintext from old data
                         password = server['password']
-                        if isinstance(password, bytes):
-                            password = password.decode('utf-8')
-                        server['password'] = password
+                    if isinstance(password, bytes):
+                        password = password.decode('utf-8')
+                    server['password'] = password
                 return server
             return None
     
@@ -992,6 +1475,7 @@ class EmailSender:
             save_to_sent = smtp_config.get('save_to_sent', 1)
             
             if not imap_host or not save_to_sent or save_to_sent == 0:
+                print(f"⚠ IMAP not configured: imap_host={imap_host}, save_to_sent={save_to_sent}")
                 return  # IMAP not configured or disabled
             
             imap_port = int(smtp_config.get('imap_port', 993))
@@ -999,22 +1483,25 @@ class EmailSender:
             password = smtp_config.get('password', '').strip()
             
             if not username or not password:
+                print(f"⚠ IMAP credentials missing: username={bool(username)}, password={bool(password)}")
                 return
             
-            print(f"Attempting to save email to IMAP Sent folder: {imap_host}:{imap_port}")
+            print(f"📁 Connecting to IMAP: {imap_host}:{imap_port} as {username}")
             
             # Connect to IMAP server
             if imap_port == 993:
-                imap = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=10)
+                imap = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=30)
             else:
-                imap = imaplib.IMAP4(imap_host, imap_port, timeout=10)
+                imap = imaplib.IMAP4(imap_host, imap_port, timeout=30)
                 try:
                     imap.starttls()
                 except:
                     pass  # TLS not supported
             
             # Login
+            print(f"📁 Authenticating to IMAP...")
             imap.login(username, password)
+            print(f"✓ IMAP authenticated")
             
             # Select Sent folder (try common names)
             sent_folders = ['Sent', 'Sent Items', 'Sent Messages', 'INBOX.Sent', '"Sent"', '"Sent Items"']
@@ -1025,20 +1512,26 @@ class EmailSender:
                     status, _ = imap.select(folder)
                     if status == 'OK':
                         selected_folder = folder
+                        print(f"✓ Found Sent folder: {folder}")
                         break
-                except:
+                except Exception as folder_error:
+                    print(f"  Folder '{folder}' not found: {folder_error}")
                     continue
             
             if not selected_folder:
                 # Try to use INBOX as fallback
+                print(f"⚠ No standard Sent folder found, trying INBOX as fallback...")
                 try:
                     status, _ = imap.select('INBOX')
                     if status == 'OK':
                         selected_folder = 'INBOX'
+                        print(f"✓ Using INBOX as fallback")
                     else:
+                        print(f"✗ INBOX selection failed")
                         imap.logout()
                         return
-                except:
+                except Exception as inbox_error:
+                    print(f"✗ INBOX selection error: {inbox_error}")
                     imap.logout()
                     return
             
@@ -1050,7 +1543,9 @@ class EmailSender:
             else:
                 email_bytes = email_str
             
-            imap.append(selected_folder, None, None, email_bytes)
+            print(f"📁 Appending email to {selected_folder}...")
+            result = imap.append(selected_folder, None, None, email_bytes)
+            print(f"✓ IMAP append result: {result}")
             
             imap.logout()
             print(f"✓ Email saved to IMAP Sent folder: {selected_folder}")
@@ -1081,6 +1576,7 @@ class EmailSender:
                         'last_name': rec.get('last_name', '') or ''
                     }
             else:
+                # SQLite
                 conn = self.db.connect()
                 cursor = conn.cursor()
                 cursor.execute("SELECT email, first_name, last_name FROM recipients WHERE id = ?", (recipient_id,))
@@ -1105,6 +1601,7 @@ class EmailSender:
                         'user_id': camp.get('user_id')
                     }
             else:
+                # SQLite
                 conn = self.db.connect()
                 cursor = conn.cursor()
                 cursor.execute("SELECT subject, sender_name, sender_email, html_content, user_id FROM campaigns WHERE id = ?", (campaign_id,))
@@ -1183,11 +1680,14 @@ class EmailSender:
                 'sent_at': now.isoformat()
             }).eq('id', queue_id).execute()
             
-            # Update campaign_recipients
-            self.db.supabase.client.table('campaign_recipients').update({
-                'status': 'sent',
-                'sent_at': now.isoformat()
-            }).eq('campaign_id', campaign_id).eq('recipient_id', recipient_id).execute()
+            # Update campaign_recipients (if table exists)
+            try:
+                self.db.supabase.client.table('campaign_recipients').update({
+                    'status': 'sent',
+                    'sent_at': now.isoformat()
+                }).eq('campaign_id', campaign_id).eq('recipient_id', recipient_id).execute()
+            except:
+                pass  # Table might not exist
             
             # Check if all emails for this campaign are sent
             result = self.db.supabase.client.table('email_queue').select('id', count='exact').eq('campaign_id', campaign_id).in_('status', ['pending', 'processing']).execute()
@@ -1274,49 +1774,101 @@ class EmailSender:
                 """, (now, campaign_id))
                 print(f"Campaign {campaign_id} marked as sent (all emails delivered)")
             
-            # Update daily stats - use IST date (with user_id)
-            user_id = campaign_info.get('user_id') if campaign_info else None
-            if not user_id:
-                cursor.execute("SELECT user_id FROM campaigns WHERE id = ?", (campaign_id,))
-                row = cursor.fetchone()
-                if row:
-                    user_id = row[0]
-            
-            if user_id:
-                today = get_ist_now().date()
-                cursor.execute("""
-                    INSERT OR REPLACE INTO daily_stats (user_id, date, emails_sent, emails_delivered)
-                    VALUES (?, ?, 
-                        COALESCE((SELECT emails_sent FROM daily_stats WHERE user_id = ? AND date = ?), 0) + 1,
-                        COALESCE((SELECT emails_delivered FROM daily_stats WHERE user_id = ? AND date = ?), 0) + 1
-                    )
-                """, (user_id, today, user_id, today, user_id, today))
+                # Update daily stats - use IST date (with user_id)
+                user_id = campaign_info.get('user_id') if campaign_info else None
+                if not user_id:
+                    cursor.execute("SELECT user_id FROM campaigns WHERE id = ?", (campaign_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        user_id = row[0]
+                
+                if user_id:
+                    today = get_ist_now().date()
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO daily_stats (user_id, date, emails_sent, emails_delivered)
+                        VALUES (?, ?, 
+                            COALESCE((SELECT emails_sent FROM daily_stats WHERE user_id = ? AND date = ?), 0) + 1,
+                            COALESCE((SELECT emails_delivered FROM daily_stats WHERE user_id = ? AND date = ?), 0) + 1
+                        )
+                    """, (user_id, today, user_id, today, user_id, today))
             
             conn.commit()
     
     def mark_failed(self, queue_id, error_msg):
         """Mark email as failed"""
-        conn = self.db.connect()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            UPDATE email_queue 
-            SET status = 'failed', attempts = attempts + 1
-            WHERE id = ?
-        """, (queue_id,))
-        
-        conn.commit()
+        try:
+            # Check if using Supabase FIRST before trying to use SQLite methods
+            use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
+            
+            if use_supabase:
+                # Try to get attempts count (column might not exist)
+                current_attempts = 0
+                try:
+                    result = self.db.supabase.client.table('email_queue').select('attempts').eq('id', queue_id).execute()
+                    if result.data and len(result.data) > 0:
+                        current_attempts = result.data[0].get('attempts', 0) or 0
+                except:
+                    # Column doesn't exist, use 0
+                    current_attempts = 0
+                
+                # Update status (only include attempts if column exists)
+                update_data = {
+                    'status': 'failed',
+                    'error_message': str(error_msg)[:500]  # Limit error message length
+                }
+                # Only add attempts if we successfully retrieved it (column exists)
+                if current_attempts >= 0:  # Will try to update attempts
+                    try:
+                        update_data['attempts'] = current_attempts + 1
+                        self.db.supabase.client.table('email_queue').update(update_data).eq('id', queue_id).execute()
+                    except:
+                        # If attempts column doesn't exist, update without it
+                        del update_data['attempts']
+                        self.db.supabase.client.table('email_queue').update(update_data).eq('id', queue_id).execute()
+                else:
+                    self.db.supabase.client.table('email_queue').update(update_data).eq('id', queue_id).execute()
+            else:
+                # SQLite
+                conn = self.db.connect()
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    UPDATE email_queue
+                    SET status = 'failed', attempts = attempts + 1, error_message = ?
+                    WHERE id = ?
+                """, (str(error_msg)[:500], queue_id))
+                
+                conn.commit()
+        except Exception as e:
+            print(f"Error marking email as failed: {e}")
+            import traceback
+            traceback.print_exc()
     
     def mark_skipped(self, queue_id, reason):
         """Mark email as skipped"""
-        conn = self.db.connect()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            UPDATE email_queue 
-            SET status = 'skipped'
-            WHERE id = ?
-        """, (queue_id,))
-        
-        conn.commit()
+        try:
+            # Check if using Supabase FIRST before trying to use SQLite methods
+            use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
+            
+            if use_supabase:
+                self.db.supabase.client.table('email_queue').update({
+                    'status': 'skipped',
+                    'error_message': str(reason)[:500] if reason else None
+                }).eq('id', queue_id).execute()
+            else:
+                # SQLite
+                conn = self.db.connect()
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    UPDATE email_queue
+                    SET status = 'skipped', error_message = ?
+                    WHERE id = ?
+                """, (str(reason)[:500] if reason else None, queue_id))
+                
+                conn.commit()
+        except Exception as e:
+            print(f"Error marking email as skipped: {e}")
+            import traceback
+            traceback.print_exc()
 

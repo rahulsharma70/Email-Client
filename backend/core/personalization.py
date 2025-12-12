@@ -65,8 +65,15 @@ class EmailPersonalizer:
         Returns:
             Personalized email content
         """
+        print(f"🤖 Starting LLM personalization for {name} at {company}")
+        print(f"   API Key present: {bool(self.api_key)}")
+        print(f"   Model: {self.model}")
+        print(f"   User ID: {self.user_id}")
+        
         if not self.api_key:
             # Fallback to simple replacement if no API key
+            print(f"⚠️  WARNING: No OpenRouter API key found! Falling back to template replacement.")
+            print(f"   Set OPENROUTER_API_KEY in .env file or environment variables")
             personalized = template.replace('{name}', name)
             personalized = personalized.replace('{company}', company)
             return personalized
@@ -81,7 +88,9 @@ class EmailPersonalizer:
         quota_check = self._check_quota()
         if not quota_check.get('allowed', True):
             # Quota exceeded - use fallback
-            print(f"LLM quota exceeded for user {self.user_id}, using fallback")
+            reason = quota_check.get('reason', 'Unknown quota limit')
+            print(f"⚠️  LLM quota exceeded for user {self.user_id}: {reason}")
+            print(f"   Falling back to template replacement")
             personalized = template.replace('{name}', name)
             personalized = personalized.replace('{company}', company)
             return personalized
@@ -93,24 +102,41 @@ class EmailPersonalizer:
             quota_mgr = QuotaManager(self.db)
             cost_check = quota_mgr.check_llm_cost_quota(self.user_id, estimated_tokens)
             if not cost_check.get('allowed', True):
-                print(f"LLM cost quota exceeded for user {self.user_id}, using fallback")
+                reason = cost_check.get('reason', 'Unknown cost limit')
+                print(f"⚠️  LLM cost quota exceeded for user {self.user_id}: {reason}")
+                print(f"   Falling back to template replacement")
                 personalized = template.replace('{name}', name)
                 personalized = personalized.replace('{company}', company)
                 return personalized
         
+        print(f"✓ Quota checks passed, calling OpenRouter API...")
+        
+        # Replace merge tags in template before sending to LLM
+        # This ensures the LLM sees the actual values, not placeholders
+        template_for_llm = template
+        if name:
+            # Replace various name formats
+            template_for_llm = template_for_llm.replace('{{first_name}}', name.split()[0] if name.split() else name)
+            template_for_llm = template_for_llm.replace('{{name}}', name)
+            template_for_llm = template_for_llm.replace('{name}', name)
+            template_for_llm = template_for_llm.replace('{first_name}', name.split()[0] if name.split() else name)
+        if company:
+            template_for_llm = template_for_llm.replace('{{company}}', company)
+            template_for_llm = template_for_llm.replace('{company}', company)
+        
         # Use custom prompt if provided, otherwise use default
         if custom_prompt:
             # Replace placeholders in custom prompt
-            prompt = custom_prompt.replace('{template}', template)
+            prompt = custom_prompt.replace('{template}', template_for_llm)
             prompt = prompt.replace('{name}', name)
             prompt = prompt.replace('{company}', company)
             prompt = prompt.replace('{context}', context if context else 'No additional context provided')
         else:
-            # Default prompt
+            # Default prompt - use template with merge tags already replaced
             prompt = f"""Personalize this email template for a specific recipient.
 
-Email Template:
-{template}
+Email Template (with placeholders):
+{template_for_llm}
 
 Recipient Information:
 - Name: {name}
@@ -119,12 +145,13 @@ Recipient Information:
 
 Please personalize this email to:
 1. Make it feel natural and conversational
-2. Reference the recipient's name and company naturally
+2. Reference the recipient's name and company naturally (use the actual values provided above)
 3. Incorporate the context if provided
 4. Maintain the original intent and key messages
 5. Keep it professional but warm
+6. Replace any remaining placeholders like {{first_name}}, {{name}}, {{company}} with the actual values provided
 
-Return ONLY the personalized email content, no additional text or explanations."""
+Return ONLY the personalized email content, no additional text or explanations. The output should be ready to send."""
 
         try:
             headers = {
@@ -150,11 +177,22 @@ Return ONLY the personalized email content, no additional text or explanations."
                 "max_tokens": 2000
             }
             
+            print(f"📡 Calling OpenRouter API: {self.base_url}")
+            print(f"   Model: {self.model}")
+            print(f"   Prompt length: {len(prompt)} characters")
+            
             response = requests.post(self.base_url, headers=headers, json=payload, timeout=30)
+            print(f"   Response status: {response.status_code}")
+            
             response.raise_for_status()
             
             data = response.json()
             personalized_content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+            
+            if not personalized_content:
+                raise Exception("OpenRouter API returned empty content")
+            
+            print(f"✓ Received personalized content ({len(personalized_content)} characters)")
             
             # Track token usage and cost
             usage = data.get('usage', {})
@@ -162,9 +200,12 @@ Return ONLY the personalized email content, no additional text or explanations."
             completion_tokens = usage.get('completion_tokens', 0)
             total_tokens = usage.get('total_tokens', prompt_tokens + completion_tokens)
             
+            print(f"   Tokens used: {total_tokens} (prompt: {prompt_tokens}, completion: {completion_tokens})")
+            
             # Calculate cost
             cost_per_1k_tokens = 0.002
             cost = (total_tokens / 1000) * cost_per_1k_tokens
+            print(f"   Estimated cost: ${cost:.4f}")
             
             # Record usage
             if self.db and self.user_id:
@@ -282,14 +323,27 @@ Return ONLY the personalized email content, no additional text or explanations."
             return result
             
         except requests.RequestException as e:
-            print(f"Error calling OpenRouter API: {e}")
+            print(f"❌ Error calling OpenRouter API: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_data = e.response.json()
+                    print(f"   API Error Response: {error_data}")
+                except:
+                    print(f"   HTTP Status: {e.response.status_code}")
+                    print(f"   Response Text: {e.response.text[:200]}")
+            import traceback
+            traceback.print_exc()
             # Fallback to simple replacement
+            print(f"⚠️  Falling back to template replacement due to API error")
             personalized = template.replace('{name}', name)
             personalized = personalized.replace('{company}', company)
             return personalized
         except Exception as e:
-            print(f"Unexpected error in personalization: {e}")
+            print(f"❌ Unexpected error in personalization: {e}")
+            import traceback
+            traceback.print_exc()
             # Fallback to simple replacement
+            print(f"⚠️  Falling back to template replacement due to unexpected error")
             personalized = template.replace('{name}', name)
             personalized = personalized.replace('{company}', company)
             return personalized

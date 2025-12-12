@@ -151,11 +151,10 @@ class EmailVerificationManager:
             Dictionary with success status and user_id
         """
         try:
-            conn = self.db.connect()
-            cursor = conn.cursor()
+            # Check if using Supabase FIRST before trying to use SQLite methods
+            use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
             
-            # Check if using Supabase
-            if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
+            if use_supabase:
                 # Query Supabase
                 result = self.db.supabase.client.table('users').select(
                     'id, email, email_verification_token, email_verification_sent_at, email_verified'
@@ -192,6 +191,9 @@ class EmailVerificationManager:
                 }
             else:
                 # SQLite
+                conn = self.db.connect()
+                cursor = conn.cursor()
+                
                 cursor.execute("""
                     SELECT id, email, email_verification_token, email_verification_sent_at, email_verified
                     FROM users
@@ -248,11 +250,10 @@ class EmailVerificationManager:
             Dictionary with success status
         """
         try:
-            conn = self.db.connect()
-            cursor = conn.cursor()
+            # Check if using Supabase FIRST before trying to use SQLite methods
+            use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
             
-            # Check if using Supabase
-            if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
+            if use_supabase:
                 result = self.db.supabase.client.table('users').select(
                     'id, email_verified'
                 ).eq('email', email.lower().strip()).execute()
@@ -268,6 +269,9 @@ class EmailVerificationManager:
                 user_id = user['id']
             else:
                 # SQLite
+                conn = self.db.connect()
+                cursor = conn.cursor()
+                
                 cursor.execute("""
                     SELECT id, email_verified FROM users WHERE email = ?
                 """, (email.lower().strip(),))
@@ -286,12 +290,17 @@ class EmailVerificationManager:
             sent_at = datetime.now()
             
             # Update database
-            if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
+            if use_supabase:
                 self.db.supabase.client.table('users').update({
                     'email_verification_token': token,
                     'email_verification_sent_at': sent_at.isoformat()
                 }).eq('id', user_id).execute()
             else:
+                # SQLite - ensure connection exists
+                if 'conn' not in locals() or conn is None:
+                    conn = self.db.connect()
+                    cursor = conn.cursor()
+                
                 cursor.execute("""
                     UPDATE users
                     SET email_verification_token = ?,

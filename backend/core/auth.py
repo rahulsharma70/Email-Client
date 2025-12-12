@@ -131,16 +131,19 @@ class AuthManager:
                 }
         else:
             # SQLite
-            conn = self.db.connect()
-            cursor = conn.cursor()
-            
-            # Check if user already exists
-            cursor.execute("SELECT id FROM users WHERE email = ?", (email.lower().strip(),))
-            if cursor.fetchone():
-                return {
-                    'success': False,
-                    'error': 'User with this email already exists'
-                }
+            # Check if using Supabase FIRST
+            use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
+            if not use_supabase:
+                conn = self.db.connect()
+                cursor = conn.cursor()
+                
+                # Check if user already exists
+                cursor.execute("SELECT id FROM users WHERE email = ?", (email.lower().strip(),))
+                if cursor.fetchone():
+                    return {
+                        'success': False,
+                        'error': 'User with this email already exists'
+                    }
             
             # Hash password
             password_hash = self.hash_password(password)
@@ -362,8 +365,25 @@ class AuthManager:
                     return result.data[0]
                 return None
             except Exception as e:
-                print(f"Error getting user from Supabase: {e}")
-                return None
+                # Handle network errors gracefully (retry logic)
+                error_msg = str(e)
+                error_type = str(type(e).__name__)
+                if 'Resource temporarily unavailable' in error_msg or 'ReadError' in error_type or 'ConnectionError' in error_type or 'OSError' in error_type:
+                    # Network error - retry once with delay
+                    import time
+                    try:
+                        time.sleep(0.5)
+                        result = self.db.supabase.client.table('users').select(
+                            'id, email, first_name, last_name, company_name, subscription_plan, subscription_status, is_active, is_admin, stripe_customer_id, created_at'
+                        ).eq('id', user_id).execute()
+                        if result.data and len(result.data) > 0:
+                            return result.data[0]
+                    except Exception as retry_error:
+                        print(f"Error getting user from Supabase (retry failed): {retry_error}")
+                        return None
+                else:
+                    print(f"Error getting user from Supabase: {e}")
+                    return None
         else:
             # SQLite
             conn = self.db.connect()

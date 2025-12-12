@@ -52,46 +52,82 @@ class WarmupManager:
     
     def get_warmup_stage(self, smtp_server_id: int) -> Dict:
         """Get current warmup stage for an SMTP server"""
-        conn = self.db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         
-        cursor.execute("""
-            SELECT warmup_stage, warmup_emails_sent, warmup_start_date, 
-                   warmup_last_sent_date, warmup_open_rate, warmup_reply_rate
-            FROM smtp_servers
-            WHERE id = ?
-        """, (smtp_server_id,))
-        
-        row = cursor.fetchone()
-        if not row:
-            return None
-        
-        return {
-            'stage': row[0] or 0,
-            'emails_sent': row[1] or 0,
-            'start_date': row[2],
-            'last_sent_date': row[3],
-            'open_rate': row[4] or 0.0,
-            'reply_rate': row[5] or 0.0
-        }
+        if use_supabase:
+            result = self.db.supabase.client.table('smtp_servers').select(
+                'warmup_stage, warmup_emails_sent, warmup_start_date, warmup_last_sent_date, warmup_open_rate, warmup_reply_rate'
+            ).eq('id', smtp_server_id).execute()
+            
+            if not result.data or len(result.data) == 0:
+                return None
+            
+            row = result.data[0]
+            return {
+                'stage': row.get('warmup_stage', 0) or 0,
+                'emails_sent': row.get('warmup_emails_sent', 0) or 0,
+                'start_date': row.get('warmup_start_date'),
+                'last_sent_date': row.get('warmup_last_sent_date'),
+                'open_rate': row.get('warmup_open_rate', 0.0) or 0.0,
+                'reply_rate': row.get('warmup_reply_rate', 0.0) or 0.0
+            }
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT warmup_stage, warmup_emails_sent, warmup_start_date, 
+                       warmup_last_sent_date, warmup_open_rate, warmup_reply_rate
+                FROM smtp_servers
+                WHERE id = ?
+            """, (smtp_server_id,))
+            
+            row = cursor.fetchone()
+            if not row:
+                return None
+            
+            return {
+                'stage': row[0] or 0,
+                'emails_sent': row[1] or 0,
+                'start_date': row[2],
+                'last_sent_date': row[3],
+                'open_rate': row[4] or 0.0,
+                'reply_rate': row[5] or 0.0
+            }
     
     def start_warmup(self, smtp_server_id: int):
         """Start warmup process for an SMTP server"""
-        conn = self.db.connect()
-        cursor = conn.cursor()
-        
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         now = datetime.now()
-        cursor.execute("""
-            UPDATE smtp_servers
-            SET warmup_stage = 1,
-                warmup_emails_sent = 0,
-                warmup_start_date = ?,
-                warmup_last_sent_date = NULL,
-                warmup_open_rate = 0.0,
-                warmup_reply_rate = 0.0
-            WHERE id = ?
-        """, (now, smtp_server_id))
-        conn.commit()
+        
+        if use_supabase:
+            self.db.supabase.client.table('smtp_servers').update({
+                'warmup_stage': 1,
+                'warmup_emails_sent': 0,
+                'warmup_start_date': now.isoformat(),
+                'warmup_last_sent_date': None,
+                'warmup_open_rate': 0.0,
+                'warmup_reply_rate': 0.0
+            }).eq('id', smtp_server_id).execute()
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE smtp_servers
+                SET warmup_stage = 1,
+                    warmup_emails_sent = 0,
+                    warmup_start_date = ?,
+                    warmup_last_sent_date = NULL,
+                    warmup_open_rate = 0.0,
+                    warmup_reply_rate = 0.0
+                WHERE id = ?
+            """, (now, smtp_server_id))
+            conn.commit()
     
     def get_stage_config(self, stage: int) -> Dict:
         """Get configuration for a specific warmup stage"""
@@ -117,16 +153,24 @@ class WarmupManager:
         if last_sent:
             last_sent_date = datetime.fromisoformat(last_sent).date() if isinstance(last_sent, str) else last_sent.date()
             if last_sent_date == today:
-                # Check how many sent today
-                conn = self.db.connect()
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT COUNT(*) FROM email_queue
-                    WHERE smtp_server_id = ? 
-                    AND DATE(sent_at) = DATE('now')
-                    AND status = 'sent'
-                """, (smtp_server_id,))
-                sent_today = cursor.fetchone()[0]
+                    # Check how many sent today
+                use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
+                    
+                if use_supabase:
+                        # Get count of sent emails today for this SMTP server
+                        result = self.db.supabase.client.table('email_queue').select('id', count='exact').eq('smtp_server_id', smtp_server_id).eq('status', 'sent').gte('sent_at', today.isoformat()).lt('sent_at', (today + timedelta(days=1)).isoformat()).execute()
+                        sent_today = result.count if result.count else 0
+                else:
+                        # SQLite
+                        conn = self.db.connect()
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM email_queue
+                            WHERE smtp_server_id = ? 
+                            AND DATE(sent_at) = DATE('now')
+                            AND status = 'sent'
+                        """, (smtp_server_id,))
+                        sent_today = cursor.fetchone()[0]
                 
                 if sent_today >= emails_per_day:
                     # Move to next day
@@ -155,9 +199,8 @@ class WarmupManager:
     
     def record_warmup_email_sent(self, smtp_server_id: int):
         """Record that a warmup email was sent"""
-        conn = self.db.connect()
-        cursor = conn.cursor()
-        
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         now = datetime.now()
         warmup_info = self.get_warmup_stage(smtp_server_id)
         
@@ -166,22 +209,42 @@ class WarmupManager:
             stage_config = self.get_stage_config(warmup_info['stage'])
             
             # Check if we should advance to next stage
-            days_since_start = (now.date() - datetime.fromisoformat(warmup_info['start_date']).date()).days if warmup_info['start_date'] else 0
+            start_date_str = warmup_info['start_date']
+            if start_date_str:
+                if isinstance(start_date_str, str):
+                    start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00')).date()
+                else:
+                    start_date = start_date_str
+                days_since_start = (now.date() - start_date).days
+            else:
+                days_since_start = 0
+            
             new_stage = min(warmup_info['stage'] + 1, len(self.WARMUP_STAGES)) if days_since_start >= warmup_info['stage'] else warmup_info['stage']
             
-            cursor.execute("""
-                UPDATE smtp_servers
-                SET warmup_emails_sent = ?,
-                    warmup_stage = ?,
-                    warmup_last_sent_date = ?
-                WHERE id = ?
-            """, (new_count, new_stage, now, smtp_server_id))
-            conn.commit()
+            if use_supabase:
+                self.db.supabase.client.table('smtp_servers').update({
+                    'warmup_emails_sent': new_count,
+                    'warmup_stage': new_stage,
+                    'warmup_last_sent_date': now.isoformat()
+                }).eq('id', smtp_server_id).execute()
+            else:
+                # SQLite
+                conn = self.db.connect()
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    UPDATE smtp_servers
+                    SET warmup_emails_sent = ?,
+                        warmup_stage = ?,
+                        warmup_last_sent_date = ?
+                    WHERE id = ?
+                """, (new_count, new_stage, now, smtp_server_id))
+                conn.commit()
     
     def update_warmup_metrics(self, smtp_server_id: int, open_rate: float, reply_rate: float):
         """Update warmup metrics (open rate, reply rate)"""
-        conn = self.db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         
         # Get current metrics
         warmup_info = self.get_warmup_stage(smtp_server_id)
@@ -197,13 +260,23 @@ class WarmupManager:
         new_open_rate = alpha * open_rate + (1 - alpha) * current_open
         new_reply_rate = alpha * reply_rate + (1 - alpha) * current_reply
         
-        cursor.execute("""
-            UPDATE smtp_servers
-            SET warmup_open_rate = ?,
-                warmup_reply_rate = ?
-            WHERE id = ?
-        """, (new_open_rate, new_reply_rate, smtp_server_id))
-        conn.commit()
+        if use_supabase:
+            self.db.supabase.client.table('smtp_servers').update({
+                'warmup_open_rate': new_open_rate,
+                'warmup_reply_rate': new_reply_rate
+            }).eq('id', smtp_server_id).execute()
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE smtp_servers
+                SET warmup_open_rate = ?,
+                    warmup_reply_rate = ?
+                WHERE id = ?
+            """, (new_open_rate, new_reply_rate, smtp_server_id))
+            conn.commit()
     
     def auto_adjust_cadence(self, smtp_server_id: int) -> Dict:
         """Auto-adjust warmup cadence based on metrics"""

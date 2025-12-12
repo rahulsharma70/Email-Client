@@ -266,28 +266,67 @@ class InboxMonitor:
         Args:
             responses: List of response dictionaries
         """
-        conn = self.db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         
-        for response in responses:
-            try:
-                cursor.execute("""
-                    INSERT OR REPLACE INTO email_responses 
-                    (sent_email_id, recipient_email, subject, response_type, is_hot_lead, response_content)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (
-                    response.get('sent_email_id'),
-                    response.get('recipient_email'),
-                    response.get('subject'),
-                    response.get('response_type', 'reply'),
-                    1 if response.get('is_hot_lead') else 0,
-                    response.get('response_content', '')
-                ))
-            except Exception as e:
-                print(f"Error saving response: {e}")
-                continue
-        
-        conn.commit()
+        if use_supabase:
+            # Use Supabase table methods
+            for response in responses:
+                try:
+                    # Prepare data for Supabase
+                    response_data = {
+                        'sent_email_id': response.get('sent_email_id'),
+                        'recipient_email': response.get('recipient_email'),
+                        'subject': response.get('subject'),
+                        'response_type': response.get('response_type', 'reply'),
+                        'is_hot_lead': 1 if response.get('is_hot_lead') else 0,
+                        'response_content': response.get('response_content', ''),
+                        'received_at': response.get('received_at') or response.get('created_at')
+                    }
+                    
+                    # Remove None values
+                    response_data = {k: v for k, v in response_data.items() if v is not None}
+                    
+                    # Try to insert or update (upsert based on recipient_email + subject if unique)
+                    # First check if response already exists
+                    existing = self.db.supabase.client.table('email_responses').select('id').eq('recipient_email', response_data.get('recipient_email', '')).eq('subject', response_data.get('subject', '')).limit(1).execute()
+                    
+                    if existing.data and len(existing.data) > 0:
+                        # Update existing
+                        self.db.supabase.client.table('email_responses').update(response_data).eq('id', existing.data[0]['id']).execute()
+                    else:
+                        # Insert new
+                        self.db.supabase.client.table('email_responses').insert(response_data).execute()
+                        
+                except Exception as e:
+                    print(f"Error saving response to Supabase: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            for response in responses:
+                try:
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO email_responses 
+                        (sent_email_id, recipient_email, subject, response_type, is_hot_lead, response_content)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (
+                        response.get('sent_email_id'),
+                        response.get('recipient_email'),
+                        response.get('subject'),
+                        response.get('response_type', 'reply'),
+                        1 if response.get('is_hot_lead') else 0,
+                        response.get('response_content', '')
+                    ))
+                except Exception as e:
+                    print(f"Error saving response: {e}")
+                    continue
+            
+            conn.commit()
     
     def check_follow_ups_needed(self) -> List[Dict]:
         """

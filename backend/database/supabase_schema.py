@@ -75,6 +75,14 @@ class SupabaseSchema:
                 stripe_customer_id TEXT,
                 stripe_subscription_id TEXT,
                 subscription_status TEXT DEFAULT 'active',
+                email_verified INTEGER DEFAULT 0,
+                email_verification_token TEXT,
+                email_verification_sent_at TIMESTAMP,
+                one_time_password TEXT,
+                account_activated_at TIMESTAMP,
+                onboarding_completed INTEGER DEFAULT 0,
+                onboarding_step INTEGER DEFAULT 0,
+                onboarding_data TEXT,
                 created_at TIMESTAMP DEFAULT NOW(),
                 updated_at TIMESTAMP DEFAULT NOW()
             );
@@ -220,6 +228,7 @@ class SupabaseSchema:
                 id BIGSERIAL PRIMARY KEY,
                 user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
                 icp_description TEXT NOT NULL,
+                lead_type TEXT DEFAULT 'B2B',
                 status TEXT DEFAULT 'pending',
                 companies_found INTEGER DEFAULT 0,
                 leads_found INTEGER DEFAULT 0,
@@ -278,14 +287,18 @@ class SupabaseSchema:
             """
             CREATE TABLE IF NOT EXISTS email_tracking (
                 id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
                 campaign_id BIGINT REFERENCES campaigns(id) ON DELETE CASCADE,
                 recipient_id BIGINT REFERENCES recipients(id) ON DELETE CASCADE,
                 email_address TEXT NOT NULL,
+                event_type TEXT DEFAULT 'sent',
                 sent_at TIMESTAMP,
                 opened_at TIMESTAMP,
                 clicked_at TIMESTAMP,
                 bounced INTEGER DEFAULT 0,
                 unsubscribed INTEGER DEFAULT 0,
+                bounce_type TEXT,
+                bounce_reason TEXT,
                 created_at TIMESTAMP DEFAULT NOW()
             );
             """,

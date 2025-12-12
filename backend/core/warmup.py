@@ -34,19 +34,33 @@ class WarmupManager:
         Returns:
             Dictionary with stage info and limits
         """
-        conn = self.db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         
-        cursor.execute("""
-            SELECT id, created_at, warmup_stage, warmup_emails_sent, daily_sent_count, last_sent_date
-            FROM smtp_servers WHERE id = ?
-        """, (smtp_server_id,))
-        row = cursor.fetchone()
-        
-        if not row:
-            return {'error': 'SMTP server not found'}
-        
-        server = dict(row)
+        if use_supabase:
+            result = self.db.supabase.client.table('smtp_servers').select(
+                'id, created_at, warmup_stage, warmup_emails_sent, daily_sent_count, last_sent_date'
+            ).eq('id', smtp_server_id).execute()
+            
+            if not result.data or len(result.data) == 0:
+                return {'error': 'SMTP server not found'}
+            
+            server = result.data[0]
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT id, created_at, warmup_stage, warmup_emails_sent, daily_sent_count, last_sent_date
+                FROM smtp_servers WHERE id = ?
+            """, (smtp_server_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return {'error': 'SMTP server not found'}
+            
+            server = dict(row)
         created_at = server.get('created_at')
         if isinstance(created_at, str):
             created_at = datetime.fromisoformat(created_at.replace(' ', 'T'))
@@ -103,22 +117,49 @@ class WarmupManager:
             }
         
         # Check daily limit
-        conn = self.db.connect()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT daily_sent_count, last_sent_date FROM smtp_servers WHERE id = ?
-        """, (smtp_server_id,))
-        row = cursor.fetchone()
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         
-        if not row:
-            return {'can_send': False, 'reason': 'SMTP server not found'}
+        if use_supabase:
+            result = self.db.supabase.client.table('smtp_servers').select(
+                'daily_sent_count, last_sent_date'
+            ).eq('id', smtp_server_id).execute()
+            
+            if not result.data or len(result.data) == 0:
+                return {'can_send': False, 'reason': 'SMTP server not found'}
+            
+            server = result.data[0]
+            daily_sent = server.get('daily_sent_count', 0) or 0
+            last_sent_date = server.get('last_sent_date')
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT daily_sent_count, last_sent_date FROM smtp_servers WHERE id = ?
+            """, (smtp_server_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return {'can_send': False, 'reason': 'SMTP server not found'}
+            
+            daily_sent = row[0] or 0
+            last_sent_date = row[1]
         
-        daily_sent = row[0] or 0
-        last_sent_date = row[1]
         today = date.today()
         
         # Reset if new day
-        if not last_sent_date or (isinstance(last_sent_date, str) and datetime.fromisoformat(last_sent_date).date() < today):
+        if last_sent_date:
+            if isinstance(last_sent_date, str):
+                try:
+                    last_date = datetime.fromisoformat(last_sent_date.replace('Z', '+00:00')).date()
+                    if last_date < today:
+                        daily_sent = 0
+                except:
+                    daily_sent = 0
+            elif hasattr(last_sent_date, 'date'):
+                if last_sent_date.date() < today:
+                    daily_sent = 0
+        else:
             daily_sent = 0
         
         max_emails = stage_info['max_emails_today']
@@ -152,8 +193,8 @@ class WarmupManager:
         if 'error' in stage_info:
             return
         
-        conn = self.db.connect()
-        cursor = conn.cursor()
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
         
         # Update warmup stage if needed
         days = stage_info['days_since_creation']
@@ -164,11 +205,27 @@ class WarmupManager:
             else:
                 break
         
-        cursor.execute("""
-            UPDATE smtp_servers 
-            SET warmup_stage = ?,
-                warmup_emails_sent = warmup_emails_sent + 1
-            WHERE id = ?
-        """, (new_stage, smtp_server_id))
-        conn.commit()
+        if use_supabase:
+            # Get current warmup_emails_sent
+            result = self.db.supabase.client.table('smtp_servers').select('warmup_emails_sent').eq('id', smtp_server_id).execute()
+            current_count = 0
+            if result.data and len(result.data) > 0:
+                current_count = result.data[0].get('warmup_emails_sent', 0) or 0
+            
+            self.db.supabase.client.table('smtp_servers').update({
+                'warmup_stage': new_stage,
+                'warmup_emails_sent': current_count + 1
+            }).eq('id', smtp_server_id).execute()
+        else:
+            # SQLite
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE smtp_servers 
+                SET warmup_stage = ?,
+                    warmup_emails_sent = warmup_emails_sent + 1
+                WHERE id = ?
+            """, (new_stage, smtp_server_id))
+            conn.commit()
 
