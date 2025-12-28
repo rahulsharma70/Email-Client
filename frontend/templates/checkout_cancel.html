@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Payment Cancelled - ANAGHA SOLUTION</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .cancel-container {
+            max-width: 600px;
+            margin: 100px auto;
+            padding: 40px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .cancel-icon {
+            color: #ffc107;
+            font-size: 64px;
+            margin-bottom: 20px;
+        }
+        .cancel-container h1 {
+            margin-bottom: 20px;
+            color: #333;
+        }
+        .cancel-container p {
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        .btn {
+            display: inline-block;
+            padding: 12px 24px;
+            background-color: #635bff;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 10px;
+        }
+        .btn:hover {
+            background-color: #5548e6;
+        }
+        .btn-secondary {
+            background-color: #6c757d;
+        }
+        .btn-secondary:hover {
+            background-color: #5a6268;
+        }
+    </style>
+</head>
+<body>
+    <div class="cancel-container">
+        <div class="cancel-icon">⚠</div>
+        <h1>Payment Cancelled</h1>
+        <p>Your payment was cancelled. No charges were made.</p>
+        <p>If you'd like to complete your subscription, you can try again anytime.</p>
+        <div style="margin-top: 30px;">
+            <a href="/dashboard" class="btn">Go to Dashboard</a>
+            <a href="/pricing" class="btn btn-secondary">View Pricing</a>
+        </div>
+    </div>
+</body>
+</html>

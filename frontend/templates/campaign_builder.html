@@ -1,0 +1,608 @@
+{% extends "base.html" %}
+
+{% block title %}Campaign Builder - ANAGHA SOLUTION{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-envelope"></i> Create New Campaign</h1>
+</div>
+
+<div class="form-container">
+    <form id="campaignForm">
+        <div class="form-group">
+            <label>Campaign Name *</label>
+            <input type="text" name="name" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Subject Line *</label>
+            <input type="text" name="subject" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Sender Name *</label>
+            <input type="text" name="sender_name" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Sender Email *</label>
+            <input type="email" name="sender_email" required>
+        </div>
+        
+        <div class="form-group">
+            <label>Load Template (Optional)</label>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <select id="templateSelect" style="flex: 1; padding: 10px;">
+                    <option value="">-- Select a template --</option>
+                    {% for template in templates %}
+                    <option value="{{ template.id }}" data-content="{{ template.html_content|e }}">{{ template.name }} ({{ template.category }})</option>
+                    {% endfor %}
+                </select>
+                <button type="button" class="btn btn-primary" onclick="loadSelectedTemplate()">
+                    <i class="fas fa-file-import"></i> Load Template
+                </button>
+            </div>
+        </div>
+        
+        <div class="form-group">
+            <label>Message Type *</label>
+            <select name="message_type" id="messageType" required onchange="toggleMessageEditor()">
+                <option value="text">Plain Text</option>
+                <option value="html">HTML</option>
+            </select>
+        </div>
+        
+        <div class="form-group" id="textContentGroup">
+            <label>Message Content (Text) *</label>
+            <textarea name="text_content" id="textContent" rows="10" placeholder="Enter your message text here. Use merge tags: {name}, {email}, {company}, {city}"></textarea>
+        </div>
+        
+        <div class="form-group" id="htmlContentGroup" style="display: none;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                <label style="margin: 0;">HTML Content *</label>
+                <button type="button" class="btn btn-info" onclick="saveAsTemplate()" style="padding: 5px 15px; font-size: 12px;">
+                    <i class="fas fa-save"></i> Save as Template
+                </button>
+            </div>
+            <textarea name="html_content" id="htmlContent" rows="10" placeholder="Enter HTML content or use merge tags: {name}, {email}, {company}, {city}" oninput="autoSaveTemplate()"></textarea>
+            <small style="color: #7f8c8d; display: block; margin-top: 5px;">
+                💡 Tip: Your template will be auto-saved as you design it. Or click "Save as Template" to save manually.
+            </small>
+        </div>
+        
+        <div class="form-group">
+            <label>Attachments</label>
+            <input type="file" name="attachments" id="attachments" multiple accept=".pdf,.txt,.doc,.docx,.jpg,.jpeg,.png,.mp3,.mp4">
+            <small style="color: #7f8c8d; display: block; margin-top: 5px;">
+                Supported formats: PDF, TXT, Word (DOC/DOCX), JPEG, PNG, MP3, MP4
+            </small>
+            <div id="attachmentList" style="margin-top: 10px;"></div>
+        </div>
+        
+        <div class="form-group">
+            <label>Select SMTP Servers (Select at least 1 server) *</label>
+            <div id="smtpServersList" style="background: #f8f9fa; padding: 15px; border-radius: 5px; border: 1px solid #dee2e6;">
+                <div style="display: flex; align-items: center; margin-bottom: 10px;">
+                    <span style="color: #7f8c8d; font-size: 14px;">
+                        <i class="fas fa-info-circle"></i> Select one or more SMTP servers. Emails will be distributed evenly across selected servers.
+                    </span>
+                    <span id="selectedCount" style="margin-left: auto; font-weight: bold; color: #3498db;">0 selected</span>
+                </div>
+                <div id="smtpServersContainer" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px;">
+                    <p style="color: #7f8c8d; grid-column: 1 / -1;">Loading SMTP servers...</p>
+                </div>
+                <small style="color: #e74c3c; display: block; margin-top: 10px;" id="smtpSelectionError"></small>
+            </div>
+        </div>
+        
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="use_personalization" id="usePersonalization" onchange="togglePersonalizationPrompt()">
+                Enable AI Personalization (uses OpenRouter API)
+            </label>
+            <small style="color: #7f8c8d; display: block; margin-top: 5px;">
+                💡 Personalize emails using AI based on recipient name, company, and context
+            </small>
+        </div>
+        
+        <div class="form-group" id="personalizationPromptGroup" style="display: none;">
+            <label for="personalizationPrompt">Personalization Prompt *</label>
+            <textarea name="personalization_prompt" id="personalizationPrompt" rows="6" 
+                      placeholder="Enter instructions for how to personalize the email. You can use placeholders: {template}, {name}, {company}, {context}"></textarea>
+            <small style="color: #7f8c8d; display: block; margin-top: 5px;">
+                Example: "Personalize this email template for {name} at {company}. Make it conversational and reference their industry. Template: {template}"
+            </small>
+        </div>
+        
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="send_now" id="sendNowCheckbox" checked> Send immediately after creating
+            </label>
+            <small style="color: #7f8c8d; display: block; margin-top: 5px;">
+                ✓ Check this box to send emails immediately. Uncheck to save as draft.
+            </small>
+        </div>
+        
+        <div style="display: flex; gap: 10px; margin-top: 20px;">
+            <button type="submit" class="btn btn-success">
+                <i class="fas fa-paper-plane"></i> Create & Send Campaign
+            </button>
+            <button type="button" class="btn btn-secondary" onclick="saveDraft()">
+                <i class="fas fa-save"></i> Save as Draft
+            </button>
+            <button type="button" class="btn btn-info" onclick="saveAsTemplate()" id="saveTemplateBtn" style="display: none;">
+                <i class="fas fa-file-code"></i> Save as Template
+            </button>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function togglePersonalizationPrompt() {
+    const checkbox = document.getElementById('usePersonalization');
+    const promptGroup = document.getElementById('personalizationPromptGroup');
+    const promptField = document.getElementById('personalizationPrompt');
+    
+    if (checkbox.checked) {
+        promptGroup.style.display = 'block';
+        promptField.required = true;
+    } else {
+        promptGroup.style.display = 'none';
+        promptField.required = false;
+        promptField.value = '';
+    }
+}
+
+// Load templates on page load
+let templatesData = {};
+{% for template in templates %}
+templatesData[{{ template.id }}] = {{ template.html_content|tojson }};
+{% endfor %}
+
+function loadSelectedTemplate() {
+    const templateSelect = document.getElementById('templateSelect');
+    const templateId = templateSelect.value;
+    
+    if (!templateId) {
+        showAlert('Please select a template first!', 'error');
+        return;
+    }
+    
+    const templateContent = templatesData[templateId];
+    if (!templateContent) {
+        showAlert('Template content not found!', 'error');
+        return;
+    }
+    
+    // Switch to HTML mode if not already
+    document.getElementById('messageType').value = 'html';
+    toggleMessageEditor();
+    
+    // Load template content into HTML editor
+    document.getElementById('htmlContent').value = templateContent;
+    
+    showAlert('Template loaded successfully!', 'success');
+}
+
+// Auto-save timer for templates
+let autoSaveTimer = null;
+let lastSavedContent = '';
+let autoSaveEnabled = true;
+
+// SMTP Server Selection
+let selectedSmtpServers = [];
+const MIN_SELECTED_SERVERS = 1; // Minimum 1 server required
+const MAX_SELECTED_SERVERS = 10; // Maximum 10 servers (can be adjusted)
+
+// Load SMTP servers on page load
+async function loadSmtpServers() {
+    try {
+        const response = await axios.get('/api/smtp/list');
+        if (response.data.success) {
+            const servers = response.data.servers.filter(s => s.is_active);
+            displaySmtpServers(servers);
+        }
+    } catch (error) {
+        console.error('Error loading SMTP servers:', error);
+        document.getElementById('smtpServersContainer').innerHTML = 
+            '<p style="color: #e74c3c; grid-column: 1 / -1;">Error loading SMTP servers. Please refresh the page.</p>';
+    }
+}
+
+function displaySmtpServers(servers) {
+    const container = document.getElementById('smtpServersContainer');
+    
+    if (servers.length === 0) {
+        container.innerHTML = '<p style="color: #e74c3c; grid-column: 1 / -1;">No active SMTP servers found. Please add SMTP servers first.</p>';
+        return;
+    }
+    
+    container.innerHTML = servers.map(server => {
+        const isChecked = selectedSmtpServers.includes(server.id);
+        return `
+        <label style="display: flex; align-items: center; padding: 10px; background: ${isChecked ? '#d5f4e6' : 'white'}; border: 2px solid ${isChecked ? '#27ae60' : '#dee2e6'}; border-radius: 5px; cursor: pointer; transition: all 0.2s;" 
+               onmouseover="if(!this.querySelector('input').checked) this.style.borderColor='#3498db'" 
+               onmouseout="if(!this.querySelector('input').checked) this.style.borderColor='#dee2e6'">
+            <input type="checkbox" 
+                   value="${server.id}" 
+                   data-server-name="${server.name}"
+                   ${isChecked ? 'checked' : ''}
+                   onchange="toggleSmtpServer(${server.id}, this.checked, this)"
+                   style="margin-right: 10px; width: 18px; height: 18px; cursor: pointer;">
+            <div style="flex: 1;">
+                <div style="font-weight: bold; color: #2c3e50;">${server.name}</div>
+                <div style="font-size: 12px; color: #7f8c8d;">${server.username}</div>
+                <div style="font-size: 11px; color: #95a5a6;">${server.host}:${server.port}</div>
+            </div>
+        </label>
+    `;
+    }).join('');
+}
+
+function toggleSmtpServer(serverId, isChecked, checkboxElement) {
+    const errorMsg = document.getElementById('smtpSelectionError');
+    errorMsg.textContent = '';
+    
+    if (isChecked) {
+        if (selectedSmtpServers.length >= MAX_SELECTED_SERVERS) {
+            // Uncheck this checkbox
+            checkboxElement.checked = false;
+            errorMsg.textContent = `You can only select ${MAX_SELECTED_SERVERS} SMTP servers at a time.`;
+            showAlert(`Maximum ${MAX_SELECTED_SERVERS} servers allowed. Please deselect one first.`, 'error');
+            return;
+        }
+        if (!selectedSmtpServers.includes(serverId)) {
+            selectedSmtpServers.push(serverId);
+        }
+    } else {
+        selectedSmtpServers = selectedSmtpServers.filter(id => id !== serverId);
+    }
+    
+    updateSelectedCount();
+    updateCheckboxStyles();
+}
+
+function updateSelectedCount() {
+    const countElement = document.getElementById('selectedCount');
+    const count = selectedSmtpServers.length;
+    countElement.textContent = `${count} selected`;
+    
+    if (count >= MIN_SELECTED_SERVERS && count <= MAX_SELECTED_SERVERS) {
+        countElement.style.color = '#27ae60';
+    } else if (count > MAX_SELECTED_SERVERS) {
+        countElement.style.color = '#e74c3c';
+    } else if (count > 0) {
+        countElement.style.color = '#f39c12';
+    } else {
+        countElement.style.color = '#3498db';
+    }
+}
+
+function updateCheckboxStyles() {
+    document.querySelectorAll('#smtpServersContainer input[type="checkbox"]').forEach(checkbox => {
+        const label = checkbox.closest('label');
+        if (checkbox.checked) {
+            label.style.borderColor = '#27ae60';
+            label.style.background = '#d5f4e6';
+        } else {
+            label.style.borderColor = '#dee2e6';
+            label.style.background = 'white';
+        }
+    });
+}
+
+// Load SMTP servers when page loads
+loadSmtpServers();
+
+function toggleMessageEditor() {
+    const messageType = document.getElementById('messageType').value;
+    const textGroup = document.getElementById('textContentGroup');
+    const htmlGroup = document.getElementById('htmlContentGroup');
+    const textContent = document.getElementById('textContent');
+    const htmlContent = document.getElementById('htmlContent');
+    const saveTemplateBtn = document.getElementById('saveTemplateBtn');
+    
+    if (messageType === 'text') {
+        textGroup.style.display = 'block';
+        htmlGroup.style.display = 'none';
+        textContent.required = true;
+        htmlContent.required = false;
+        saveTemplateBtn.style.display = 'none';
+    } else {
+        textGroup.style.display = 'none';
+        htmlGroup.style.display = 'block';
+        textContent.required = false;
+        htmlContent.required = true;
+        saveTemplateBtn.style.display = 'inline-block';
+    }
+}
+
+// Auto-save template as user types (debounced)
+function autoSaveTemplate() {
+    const htmlContent = document.getElementById('htmlContent').value;
+    const messageType = document.getElementById('messageType').value;
+    
+    // Only auto-save if HTML mode and content exists
+    if (messageType !== 'html' || !htmlContent.trim()) {
+        return;
+    }
+    
+    // Clear previous timer
+    if (autoSaveTimer) {
+        clearTimeout(autoSaveTimer);
+    }
+    
+    // Set new timer - auto-save after 3 seconds of no typing
+    autoSaveTimer = setTimeout(() => {
+        if (htmlContent.trim() && htmlContent !== lastSavedContent) {
+            saveTemplateAuto(htmlContent);
+        }
+    }, 3000); // 3 second delay
+}
+
+// Auto-save template (silent, no user prompt)
+async function saveTemplateAuto(htmlContent) {
+    if (!htmlContent || !htmlContent.trim()) {
+        return;
+    }
+    
+    // Generate auto-save name
+    const campaignName = document.querySelector('input[name="name"]').value || 'Untitled Campaign';
+    const templateName = `Auto-saved: ${campaignName} - ${new Date().toLocaleString()}`;
+    
+    try {
+        const response = await axios.post('/api/templates/save', {
+            name: templateName,
+            category: 'Auto-saved',
+            html_content: htmlContent
+        });
+        
+        if (response.data.success) {
+            lastSavedContent = htmlContent;
+            // Show subtle notification
+            const notification = document.createElement('div');
+            notification.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #27ae60; color: white; padding: 10px 20px; border-radius: 5px; z-index: 10000; box-shadow: 0 2px 10px rgba(0,0,0,0.2);';
+            notification.innerHTML = '<i class="fas fa-check"></i> Template auto-saved';
+            document.body.appendChild(notification);
+            setTimeout(() => notification.remove(), 2000);
+        }
+    } catch (error) {
+        // Silent fail for auto-save
+        console.log('Auto-save failed:', error);
+    }
+}
+
+// Manual save as template (with user prompt)
+async function saveAsTemplate() {
+    const htmlContent = document.getElementById('htmlContent').value;
+    const messageType = document.getElementById('messageType').value;
+    
+    if (messageType !== 'html') {
+        showAlert('Please switch to HTML mode to save as template!', 'error');
+        return;
+    }
+    
+    if (!htmlContent || !htmlContent.trim()) {
+        showAlert('Please enter HTML content first!', 'error');
+        return;
+    }
+    
+    // Prompt for template name
+    const campaignName = document.querySelector('input[name="name"]').value || 'Untitled Campaign';
+    const defaultName = campaignName !== 'Untitled Campaign' ? campaignName : `Template ${new Date().toLocaleDateString()}`;
+    
+    const templateName = prompt('Enter template name:', defaultName);
+    if (!templateName || !templateName.trim()) {
+        return;
+    }
+    
+    // Prompt for category
+    const category = prompt('Enter category (Corporate, Promotional, Personal, Newsletter, Other):', 'Other');
+    if (!category) {
+        return;
+    }
+    
+    try {
+        const response = await axios.post('/api/templates/save', {
+            name: templateName.trim(),
+            category: category.trim() || 'Other',
+            html_content: htmlContent
+        });
+        
+        if (response.data.success) {
+            showAlert(`Template "${templateName}" saved successfully!`, 'success');
+            lastSavedContent = htmlContent;
+            
+            // Reload page to refresh template list
+            setTimeout(() => {
+                window.location.reload();
+            }, 1500);
+        }
+    } catch (error) {
+        const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
+        showAlert('Error saving template: ' + errorMsg, 'error');
+        console.error('Template save error:', error);
+    }
+}
+
+// Handle file attachments display
+document.getElementById('attachments').addEventListener('change', function(e) {
+    const files = e.target.files;
+    const attachmentList = document.getElementById('attachmentList');
+    attachmentList.innerHTML = '';
+    
+    if (files.length > 0) {
+        const list = document.createElement('ul');
+        list.style.listStyle = 'none';
+        list.style.padding = '0';
+        
+        for (let i = 0; i < files.length; i++) {
+            const li = document.createElement('li');
+            li.style.padding = '5px';
+            li.style.background = '#ecf0f1';
+            li.style.marginBottom = '5px';
+            li.style.borderRadius = '3px';
+            li.innerHTML = `<i class="fas fa-paperclip"></i> ${files[i].name} (${(files[i].size / 1024).toFixed(2)} KB)`;
+            list.appendChild(li);
+        }
+        
+        attachmentList.appendChild(list);
+    }
+});
+
+document.getElementById('campaignForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    // Validate SMTP server selection (only if sending now)
+    const sendNow = document.getElementById('sendNowCheckbox').checked;
+    if (sendNow) {
+        if (selectedSmtpServers.length < MIN_SELECTED_SERVERS) {
+            showAlert(`Please select at least ${MIN_SELECTED_SERVERS} SMTP server${MIN_SELECTED_SERVERS > 1 ? 's' : ''} before sending.`, 'error');
+            document.getElementById('smtpSelectionError').textContent = 
+                `Please select at least ${MIN_SELECTED_SERVERS} SMTP server${MIN_SELECTED_SERVERS > 1 ? 's' : ''}.`;
+            return;
+        }
+        if (selectedSmtpServers.length > MAX_SELECTED_SERVERS) {
+            showAlert(`Please select at most ${MAX_SELECTED_SERVERS} SMTP servers.`, 'error');
+            document.getElementById('smtpSelectionError').textContent = 
+                `Maximum ${MAX_SELECTED_SERVERS} servers allowed.`;
+            return;
+        }
+    }
+    
+    const formData = new FormData(e.target);
+    const messageType = formData.get('message_type') || 'text';
+    
+    // Create FormData for file upload (axios will set Content-Type automatically)
+    const uploadFormData = new FormData();
+    
+    // Add all form fields
+    uploadFormData.append('name', formData.get('name'));
+    uploadFormData.append('subject', formData.get('subject'));
+    uploadFormData.append('sender_name', formData.get('sender_name'));
+    uploadFormData.append('sender_email', formData.get('sender_email'));
+    uploadFormData.append('message_type', messageType);
+    
+    if (messageType === 'text') {
+        uploadFormData.append('text_content', formData.get('text_content') || '');
+    } else {
+        uploadFormData.append('html_content', formData.get('html_content') || '');
+    }
+    
+    // Add selected SMTP servers
+    if (selectedSmtpServers.length > 0) {
+        selectedSmtpServers.forEach(serverId => {
+            uploadFormData.append('selected_smtp_servers', serverId);
+        });
+    }
+    
+    // Add personalization setting
+    const usePersonalization = document.getElementById('usePersonalization').checked;
+    uploadFormData.append('use_personalization', usePersonalization ? 'on' : '');
+    
+    // Add personalization prompt if enabled
+    if (usePersonalization) {
+        const prompt = document.getElementById('personalizationPrompt').value.trim();
+        if (!prompt) {
+            showAlert('Personalization prompt is required when AI personalization is enabled', 'error');
+            return;
+        }
+        uploadFormData.append('personalization_prompt', prompt);
+    }
+    
+    // Get send_now checkbox value
+    uploadFormData.append('send_now', sendNow ? 'on' : '');
+    
+    // Add attachments
+    const attachments = formData.getAll('attachments');
+    attachments.forEach(file => {
+        if (file instanceof File) {
+            uploadFormData.append('attachments', file);
+        }
+    });
+    
+    try {
+        const response = await axios.post('/api/campaign/create', uploadFormData, {
+            headers: {
+                'Content-Type': 'multipart/form-data'
+            }
+        });
+        
+        if (response.data.success) {
+            showAlert('Campaign created successfully!', 'success');
+            if (formData.get('send_now') === 'on') {
+                showAlert('Emails are being sent in the background.', 'info');
+            }
+            e.target.reset();
+            document.getElementById('attachmentList').innerHTML = '';
+            document.getElementById('messageType').value = 'text';
+            toggleMessageEditor();
+            // Reset SMTP selection
+            selectedSmtpServers = [];
+            updateSelectedCount();
+            loadSmtpServers(); // Reload to reset checkboxes
+        }
+    } catch (error) {
+        const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
+        showAlert('Error creating campaign: ' + errorMsg, 'error');
+        console.error('Campaign creation error:', error);
+    }
+});
+
+function saveDraft() {
+    const form = document.getElementById('campaignForm');
+    const formData = new FormData(form);
+    const messageType = formData.get('message_type') || 'text';
+    
+    const uploadFormData = new FormData();
+    uploadFormData.append('name', formData.get('name'));
+    uploadFormData.append('subject', formData.get('subject'));
+    uploadFormData.append('sender_name', formData.get('sender_name'));
+    uploadFormData.append('sender_email', formData.get('sender_email'));
+    uploadFormData.append('message_type', messageType);
+    
+    if (messageType === 'text') {
+        uploadFormData.append('text_content', formData.get('text_content') || '');
+    } else {
+        uploadFormData.append('html_content', formData.get('html_content') || '');
+    }
+    
+    const sendNow = document.getElementById('sendNowCheckbox').checked;
+    uploadFormData.append('send_now', sendNow ? 'on' : '');
+    
+    // Add personalization prompt if enabled
+    const usePersonalization = document.getElementById('usePersonalization').checked;
+    if (usePersonalization) {
+        const prompt = document.getElementById('personalizationPrompt').value.trim();
+        uploadFormData.append('personalization_prompt', prompt);
+    }
+    
+    // Add attachments
+    const attachments = formData.getAll('attachments');
+    attachments.forEach(file => {
+        if (file instanceof File) {
+            uploadFormData.append('attachments', file);
+        }
+    });
+    
+    axios.post('/api/campaign/create', uploadFormData, {
+        headers: {
+            'Content-Type': 'multipart/form-data'
+        }
+    })
+        .then((response) => {
+            if (response.data.success) {
+                showAlert('Campaign saved as draft!', 'success');
+            }
+        })
+        .catch(error => {
+            const errorMsg = error.response?.data?.error || error.message || 'Unknown error';
+            showAlert('Error saving draft: ' + errorMsg, 'error');
+            console.error('Draft save error:', error);
+        });
+}
+</script>
+{% endblock %}
+

@@ -1,155 +1,92 @@
-# ANAGHA SOLUTION - Bulk Email Software
+# ANAGHA SOLUTION - Email Marketing Platform
 
-A professional bulk email software built with Python and Tkinter.
+A comprehensive multi-tenant SaaS email marketing platform with lead scraping, email verification, AI personalization, and automated follow-ups.
 
 ## Features
 
-### 📊 Dashboard
-- Total Emails Sent Today
-- Pending Queue
-- Delivery Rate %
-- Bounce Rate %
-- Spam Rate %
-- Subscriber Growth
-- Campaign Performance Graph
+- ✅ **Multi-Tenant Architecture** - User accounts, JWT authentication, resource isolation
+- ✅ **Lead Management** - Scraping, verification, deduplication, follow-up tracking
+- ✅ **Email Campaigns** - Bulk sending, templates, personalization
+- ✅ **AI Personalization** - LLM-powered email customization
+- ✅ **Background Workers** - Celery for async processing
+- ✅ **Rate Limiting** - Provider-specific limits (Gmail, Outlook, etc.)
+- ✅ **Email Warmup** - Gradual volume increase for new accounts
+- ✅ **Billing Integration** - Stripe subscriptions and usage-based billing
+- ✅ **Supabase Support** - Cloud PostgreSQL database
+- ✅ **Deployment Ready** - Railway and Render configurations
 
-### ✉️ Email Campaign Builder
-- Create New Campaign
-- Subject Line
-- Sender Name & Email
-- Reply-to Email
-- Upload HTML Template / Drag & Drop Template Builder
-- Add Attachments (PDF, JPG, PNG, Doc)
-- Merge Tags Support
+## Project Structure
 
-### 👥 Recipient Management
-- Upload via CSV / Excel
-- Auto Remove Duplicate Emails
-- Email Verification (Optional)
-- Create Lists / Segments / Labels
-- Import & Export Contacts
+```
+Email-Client/
+├── backend/              # Backend code
+│   ├── core/            # Core modules (auth, billing, email, etc.)
+│   ├── database/        # Database managers (SQLite, Supabase)
+│   └── web_app.py       # Flask application
+├── frontend/            # Frontend code
+│   ├── templates/      # HTML templates
+│   └── static/         # CSS, JS, images
+├── Dockerfile          # Container configuration
+├── railway.json        # Railway deployment
+├── render.yaml         # Render deployment
+└── requirements.txt    # Dependencies
+```
 
-### ⚙️ SMTP Configuration
-- Add Multiple SMTP Servers
-- Rotate SMTP & IP for Bulk Sending
-- SSL/TLS Support
-- Bounce Handler Setup
+## Quick Start
 
-### 📤 Sending Settings
-- Time Interval Between Emails
-- Max Emails Per SMTP Per Hour
-- Multi-Thread Sending
-- Email Queue Priority
+### 1. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
 
-### 📝 Template Library
-- Saved Templates
-- Corporate Templates
-- Promotional Templates
-- Personalized Merge Tags
+### 2. Configure Settings
+Go to Settings page and configure:
+- Database (SQLite or Supabase)
+- API keys (Perplexity, OpenRouter)
+- Stripe (if using billing)
+- Redis (if using Celery)
 
-### 📈 Tracking & Analytics
-- Email Open Tracking (pixel based)
-- Click Tracking
-- Bounce Report
-- Unsubscribe Tracking
-- Geo-location Insights
-- Device Insights
+### 3. Run Application
+```bash
+cd backend
+python web_app.py
+```
 
-### 🛡️ Unsubscribe & Spam Control
-- Auto Unsubscribe Link
-- Blacklist Management
-- Spam Score Check
+## Deployment
 
-## Installation
+### Railway
+1. Install Railway CLI: `npm i -g @railway/cli`
+2. Login: `railway login`
+3. Initialize: `railway init`
+4. Deploy: `railway up`
 
-### Web Application (Recommended)
+### Render
+1. Go to https://render.com
+2. Create new Web Service
+3. Connect GitHub repository
+4. Set build: `pip install -r requirements.txt`
+5. Set start: `gunicorn --bind 0.0.0.0:$PORT web_app:app`
 
-The application now has a **web-based interface** that runs in your browser!
+## Documentation
 
-#### Quick Start (Web Version):
-1. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Start the web server:
-   ```bash
-   python web_app.py
-   ```
-   Or use the startup script:
-   - Windows: Double-click `start_web_server.bat`
-   - Mac/Linux: Run `./start_web_server.sh`
-3. Open your browser and go to:
-   ```
-   http://localhost:5000
-   ```
+- **Deployment Guide**: See `DEPLOYMENT_GUIDE.md`
+- **Complete Setup**: See `COMPLETE_SETUP_GUIDE.md`
+- **Quick Deployment**: See `README_DEPLOYMENT.md`
 
-### Desktop Application (Tkinter)
+## Environment Variables
 
-#### Option 1: Using Batch File (Windows)
-1. Double-click `run.bat`
-2. The script will automatically:
-   - Check for Python
-   - Create virtual environment
-   - Install dependencies
-   - Run the application
+Required:
+- `DATABASE_TYPE` - `sqlite` or `supabase`
+- `SUPABASE_URL` - Supabase project URL (if using Supabase)
+- `SUPABASE_KEY` - Supabase API key (if using Supabase)
+- `JWT_SECRET_KEY` - Secret for JWT tokens
 
-#### Option 2: Manual Installation
-1. Install Python 3.8 or higher
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Run the application:
-   ```bash
-   python main.py
-   ```
-
-### Option 3: Create Executable
-1. Install PyInstaller:
-   ```bash
-   pip install pyinstaller
-   ```
-2. Run build script:
-   ```bash
-   python build_exe.py
-   ```
-3. Find the executable in `dist/` folder
-
-## Default SMTP Configuration
-
-The application comes pre-configured with:
-- **SMTP Host**: smtpout.secureserver.net
-- **Port**: 465
-- **SSL**: Enabled
-- **Email**: info@uabiotech.in
-
-## Usage
-
-1. **Configure SMTP**: Go to SMTP Config and add your SMTP server details
-2. **Import Recipients**: Go to Recipients and import your contact list (CSV/Excel)
-3. **Create Campaign**: Go to Campaign Builder and create your email campaign
-4. **Send**: Click "Send Campaign" to add emails to queue and start sending
-
-## Database
-
-The application uses SQLite database (`anagha_solution.db`) to store:
-- Campaigns
-- Recipients
-- Templates
-- SMTP configurations
-- Tracking data
-- Analytics
-
-## Requirements
-
-- Python 3.8+
-- tkinter (usually included with Python) - for desktop version
-- pandas
-- openpyxl
-- flask - for web version
-- flask-cors - for web version
+Optional:
+- `STRIPE_SECRET_KEY` - Stripe API key
+- `REDIS_URL` - Redis connection URL
+- `PERPLEXITY_API_KEY` - Perplexity API key
+- `OPENROUTER_API_KEY` - OpenRouter API key
 
 ## License
 
-Copyright © 2024 ANAGHA SOLUTION. All rights reserved.
-
+Proprietary - ANAGHA SOLUTION

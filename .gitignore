@@ -4,30 +4,57 @@ __pycache__/
 *$py.class
 *.so
 .Python
-venv/
 env/
+venv/
 ENV/
+.venv
 
 # Database
 *.db
 *.sqlite
 *.sqlite3
+anagha_solution.db
 
-# Build files
-build/
-dist/
-*.spec
+# Environment
+.env
+.env.local
+.env.*.local
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
 
 # Logs
+logs/
 *.log
 
+# Temporary files
+temp/
+tmp/
+*.tmp
+
+# Attachments (user data)
+attachments/
+
+# Build files
+build/
+dist/
+*.egg-info/
+
+# Deployment
+.railway/
+.render/
+
+# Cache
+.cache/
+*.cache
+
+# Supabase migration (keep for reference but don't commit sensitive data)
+# supabase_migration.sql

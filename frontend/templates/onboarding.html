@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Onboarding - ANAGHA SOLUTION</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        .onboarding-container {
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 40px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            margin-bottom: 40px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #635bff, #5548e6);
+            transition: width 0.3s ease;
+        }
+        .step-indicator {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 40px;
+            position: relative;
+        }
+        .step {
+            flex: 1;
+            text-align: center;
+            position: relative;
+            z-index: 1;
+        }
+        .step-number {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #e0e0e0;
+            color: #666;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 10px;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+        .step.active .step-number {
+            background: #635bff;
+            color: white;
+        }
+        .step.completed .step-number {
+            background: #28a745;
+            color: white;
+        }
+        .step-title {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+        .step-content {
+            min-height: 400px;
+            padding: 30px;
+        }
+        .step-content h2 {
+            margin-bottom: 20px;
+            color: #333;
+        }
+        .step-content p {
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #333;
+        }
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+        .btn-primary {
+            background: #635bff;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #5548e6;
+        }
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .step-actions {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+        }
+        .verification-status {
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .verification-status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .verification-status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .verification-status.pending {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        .dns-instructions {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+        .dns-instructions code {
+            background: #e9ecef;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+        .skip-link {
+            color: #635bff;
+            cursor: pointer;
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="onboarding-container">
+        <h1 style="text-align: center; margin-bottom: 20px;">Welcome to ANAGHA SOLUTION</h1>
+        
+        <!-- Progress Bar -->
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill" style="width: {{ onboarding.progress }}%"></div>
+        </div>
+        
+        <!-- Step Indicator -->
+        <div class="step-indicator">
+            {% for step in onboarding.steps %}
+            <div class="step {% if loop.index0 == onboarding.current_step %}active{% elif loop.index0 < onboarding.current_step %}completed{% endif %}" data-step="{{ loop.index0 }}">
+                <div class="step-number">
+                    {% if loop.index0 < onboarding.current_step %}
+                        <i class="fas fa-check"></i>
+                    {% else %}
+                        {{ loop.index }}
+                    {% endif %}
+                </div>
+                <div class="step-title">{{ step.title }}</div>
+            </div>
+            {% endfor %}
+        </div>
+        
+        <!-- Step Content -->
+        <div class="step-content" id="stepContent">
+            <!-- Content will be loaded dynamically -->
+        </div>
+        
+        <!-- Step Actions -->
+        <div class="step-actions">
+            <button class="btn btn-secondary" id="prevBtn" onclick="previousStep()" style="display: none;">Previous</button>
+            <div style="flex: 1;"></div>
+            <button class="btn btn-primary" id="nextBtn" onclick="nextStep()">Next</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script>
+        const onboardingData = {{ onboarding | tojson }};
+        let currentStep = onboardingData.current_step || 0;
+        const steps = onboardingData.steps || [];
+        
+        // Load step content
+        function loadStepContent(stepIndex) {
+            const step = steps[stepIndex];
+            if (!step) return;
+            
+            const contentDiv = document.getElementById('stepContent');
+            const prevBtn = document.getElementById('prevBtn');
+            const nextBtn = document.getElementById('nextBtn');
+            
+            // Update progress
+            const progress = ((stepIndex + 1) / steps.length) * 100;
+            document.getElementById('progressFill').style.width = progress + '%';
+            
+            // Show/hide previous button
+            prevBtn.style.display = stepIndex > 0 ? 'block' : 'none';
+            
+            // Update next button text
+            if (stepIndex === steps.length - 1) {
+                nextBtn.textContent = 'Complete';
+            } else {
+                nextBtn.textContent = 'Next';
+            }
+            
+            // Load step-specific content
+            let html = `<h2>${step.title}</h2><p>${step.description}</p>`;
+            
+            switch(step.id) {
+                case 'welcome':
+                    html += `
+                        <p>We'll guide you through setting up your email marketing platform in just a few steps.</p>
+                        <ul style="line-height: 2;">
+                            <li>Add your sending domain</li>
+                            <li>Verify DNS records (SPF, DKIM, DMARC)</li>
+                            <li>Add your inbox</li>
+                            <li>Start sending campaigns!</li>
+                        </ul>
+                    `;
+                    break;
+                    
+                case 'domain':
+                    html += `
+                        <div class="form-group">
+                            <label>Domain Name</label>
+                            <input type="text" id="domainInput" placeholder="example.com" />
+                            <small style="color: #666;">Enter your domain name (without http:// or www)</small>
+                        </div>
+                        <div style="text-align: center; margin: 20px 0;">
+                            <p>OR</p>
+                        </div>
+                        <div style="text-align: center;">
+                            <button class="btn btn-primary" onclick="connectGmail()">
+                                <i class="fab fa-google"></i> Connect Gmail
+                            </button>
+                        </div>
+                    `;
+                    break;
+                    
+                case 'dns':
+                    html += `
+                        <div id="dnsVerification">
+                            <p>We'll verify your DNS records. Make sure you've added them to your domain.</p>
+                            <button class="btn btn-primary" onclick="generateDKIM()">Generate DKIM Keys</button>
+                            <div id="dnsInstructions" style="display: none;"></div>
+                            <div id="dnsStatus" style="margin-top: 20px;"></div>
+                            <button class="btn btn-primary" onclick="verifyDNS()" style="margin-top: 20px; display: none;" id="verifyDNSBtn">Verify DNS Records</button>
+                        </div>
+                    `;
+                    break;
+                    
+                case 'inbox':
+                    html += `
+                        <p>Add your inbox to start sending emails. Warmup will begin automatically.</p>
+                        <div class="form-group">
+                            <label>SMTP Host</label>
+                            <input type="text" id="smtpHost" placeholder="smtp.gmail.com" />
+                        </div>
+                        <div class="form-group">
+                            <label>SMTP Port</label>
+                            <input type="number" id="smtpPort" value="587" />
+                        </div>
+                        <div class="form-group">
+                            <label>Email Address</label>
+                            <input type="email" id="smtpEmail" placeholder="your@email.com" />
+                        </div>
+                        <div class="form-group">
+                            <label>Password / App Password</label>
+                            <input type="password" id="smtpPassword" />
+                        </div>
+                    `;
+                    break;
+                    
+                case 'tracking':
+                    html += `
+                        <p>Add a custom tracking domain for better deliverability (optional).</p>
+                        <div class="form-group">
+                            <label>Tracking Domain</label>
+                            <input type="text" id="trackingDomain" placeholder="track.example.com" />
+                        </div>
+                        <p class="skip-link" onclick="skipStep()">Skip this step</p>
+                    `;
+                    break;
+                    
+                case 'leads':
+                    html += `
+                        <p>Import your existing leads or scrape new ones (optional).</p>
+                        <div style="text-align: center;">
+                            <button class="btn btn-primary" onclick="importLeads()">Import Leads</button>
+                            <button class="btn btn-secondary" onclick="scrapeLeads()" style="margin-left: 10px;">Scrape Leads</button>
+                        </div>
+                        <p class="skip-link" onclick="skipStep()" style="text-align: center; margin-top: 20px;">Skip this step</p>
+                    `;
+                    break;
+                    
+                case 'complete':
+                    html += `
+                        <div style="text-align: center;">
+                            <i class="fas fa-check-circle" style="font-size: 64px; color: #28a745; margin-bottom: 20px;"></i>
+                            <h2>You're All Set!</h2>
+                            <p>Your account is configured and ready to use.</p>
+                            <button class="btn btn-primary" onclick="goToDashboard()" style="margin-top: 20px;">Go to Dashboard</button>
+                        </div>
+                    `;
+                    break;
+            }
+            
+            contentDiv.innerHTML = html;
+        }
+        
+        function nextStep() {
+            if (currentStep < steps.length - 1) {
+                // Save current step data
+                saveStepData();
+                currentStep++;
+                updateStep(currentStep);
+            } else {
+                completeOnboarding();
+            }
+        }
+        
+        function previousStep() {
+            if (currentStep > 0) {
+                currentStep--;
+                updateStep(currentStep);
+            }
+        }
+        
+        function updateStep(stepIndex) {
+            currentStep = stepIndex;
+            loadStepContent(stepIndex);
+            
+            // Update step indicators
+            document.querySelectorAll('.step').forEach((step, index) => {
+                step.classList.remove('active', 'completed');
+                if (index < stepIndex) {
+                    step.classList.add('completed');
+                } else if (index === stepIndex) {
+                    step.classList.add('active');
+                }
+            });
+        }
+        
+        function saveStepData() {
+            const step = steps[currentStep];
+            let data = {};
+            
+            switch(step.id) {
+                case 'domain':
+                    const domain = document.getElementById('domainInput')?.value;
+                    if (domain) data.domain = domain;
+                    break;
+                case 'inbox':
+                    data.smtp_host = document.getElementById('smtpHost')?.value;
+                    data.smtp_port = document.getElementById('smtpPort')?.value;
+                    data.smtp_email = document.getElementById('smtpEmail')?.value;
+                    break;
+                case 'tracking':
+                    data.tracking_domain = document.getElementById('trackingDomain')?.value;
+                    break;
+            }
+            
+            if (Object.keys(data).length > 0) {
+                axios.post('/api/onboarding/update-step', {
+                    step: currentStep,
+                    data: data
+                }).catch(err => console.error('Error saving step:', err));
+            }
+        }
+        
+        function skipStep() {
+            axios.post('/api/onboarding/update-step', {
+                step: currentStep + 1,
+                data: { skipped: true }
+            }).then(() => {
+                nextStep();
+            });
+        }
+        
+        function completeOnboarding() {
+            axios.post('/api/onboarding/complete')
+                .then(() => {
+                    window.location.href = '/dashboard';
+                })
+                .catch(err => {
+                    console.error('Error completing onboarding:', err);
+                    alert('Error completing onboarding. Please try again.');
+                });
+        }
+        
+        function goToDashboard() {
+            completeOnboarding();
+        }
+        
+        // DNS Functions
+        let currentDomain = '';
+        
+        function generateDKIM() {
+            const domain = onboardingData.data?.domain || prompt('Enter your domain:');
+            if (!domain) return;
+            
+            currentDomain = domain;
+            
+            axios.post('/api/dns/generate-dkim', { domain: domain })
+                .then(response => {
+                    if (response.data.success) {
+                        const instructions = response.data.instructions;
+                        let html = '<div class="dns-instructions"><h4>DNS Setup Instructions</h4>';
+                        
+                        instructions.records.forEach(record => {
+                            html += `
+                                <div style="margin-bottom: 15px;">
+                                    <strong>${record.type} Record</strong><br>
+                                    <strong>Name:</strong> <code>${record.name}</code><br>
+                                    <strong>Value:</strong> <code>${record.value}</code><br>
+                                    <small>${record.description}</small>
+                                </div>
+                            `;
+                        });
+                        
+                        html += '</div>';
+                        document.getElementById('dnsInstructions').innerHTML = html;
+                        document.getElementById('dnsInstructions').style.display = 'block';
+                        document.getElementById('verifyDNSBtn').style.display = 'block';
+                    }
+                })
+                .catch(err => {
+                    alert('Error generating DKIM keys: ' + (err.response?.data?.error || err.message));
+                });
+        }
+        
+        function verifyDNS() {
+            if (!currentDomain) {
+                currentDomain = onboardingData.data?.domain;
+            }
+            
+            if (!currentDomain) {
+                alert('Please generate DKIM keys first');
+                return;
+            }
+            
+            axios.post('/api/dns/verify', { domain: currentDomain })
+                .then(response => {
+                    if (response.data.success) {
+                        const verification = response.data.verification;
+                        let html = '<div class="verification-status ';
+                        
+                        if (verification.all_valid) {
+                            html += 'success">✓ All DNS records verified successfully!';
+                        } else {
+                            html += 'pending">';
+                            if (!verification.spf.is_valid) {
+                                html += '<div>✗ SPF: ' + verification.spf.message + '</div>';
+                            }
+                            if (!verification.dkim.is_valid) {
+                                html += '<div>✗ DKIM: ' + verification.dkim.message + '</div>';
+                            }
+                            if (!verification.dmarc.is_valid) {
+                                html += '<div>✗ DMARC: ' + verification.dmarc.message + '</div>';
+                            }
+                        }
+                        
+                        html += '</div>';
+                        document.getElementById('dnsStatus').innerHTML = html;
+                        
+                        if (verification.all_valid) {
+                            setTimeout(() => nextStep(), 2000);
+                        }
+                    }
+                })
+                .catch(err => {
+                    alert('Error verifying DNS: ' + (err.response?.data?.error || err.message));
+                });
+        }
+        
+        function connectGmail() {
+            alert('Gmail OAuth integration coming soon! For now, please add your domain manually.');
+        }
+        
+        function importLeads() {
+            window.location.href = '/leads';
+        }
+        
+        function scrapeLeads() {
+            window.location.href = '/leads';
+        }
+        
+        // Initialize
+        loadStepContent(currentStep);
+    </script>
+</body>
+</html>

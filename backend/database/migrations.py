@@ -1,0 +1,431 @@
+"""
+Database Migrations for ANAGHA SOLUTION
+Handles schema migrations and indexing
+"""
+
+import sqlite3
+from typing import List, Dict
+from database.db_manager import DatabaseManager
+from core.supabase_client import SupabaseClient
+
+class MigrationManager:
+    """Manages database migrations and schema updates"""
+    
+    def __init__(self, db_manager: DatabaseManager):
+        """Initialize migration manager"""
+        self.db = db_manager
+        self.use_supabase = hasattr(db_manager, 'use_supabase') and db_manager.use_supabase
+    
+    def create_indexes(self):
+        """Create all necessary indexes for performance"""
+        indexes = [
+            # User isolation indexes
+            ("idx_campaigns_user_id", "campaigns", "user_id"),
+            ("idx_leads_user_id", "leads", "user_id"),
+            ("idx_recipients_user_id", "recipients", "user_id"),
+            ("idx_smtp_servers_user_id", "smtp_servers", "user_id"),
+            ("idx_email_queue_user_id", "email_queue", "campaign_id"),
+            
+            # Performance indexes
+            ("idx_email_queue_status", "email_queue", "status"),
+            ("idx_email_queue_sent_at", "email_queue", "sent_at"),
+            ("idx_email_queue_scheduled_at", "email_queue", "scheduled_at"),
+            ("idx_campaign_recipients_campaign_id", "campaign_recipients", "campaign_id"),
+            ("idx_campaign_recipients_recipient_id", "campaign_recipients", "recipient_id"),
+            ("idx_tracking_campaign_id", "tracking", "campaign_id"),
+            ("idx_tracking_recipient_id", "tracking", "recipient_id"),
+            ("idx_tracking_event_type", "tracking", "event_type"),
+            ("idx_tracking_created_at", "tracking", "created_at"),
+            
+            # Warmup indexes
+            ("idx_smtp_servers_warmup_stage", "smtp_servers", "warmup_stage"),
+            
+            # Lead indexes
+            ("idx_leads_email", "leads", "email"),
+            ("idx_leads_verification_status", "leads", "verification_status"),
+            ("idx_leads_created_at", "leads", "created_at"),
+            
+            # Settings indexes
+            ("idx_app_settings_user_key", "app_settings", "user_id, setting_key"),
+        ]
+        
+        if self.use_supabase:
+            self._create_supabase_indexes(indexes)
+        else:
+            self._create_sqlite_indexes(indexes)
+    
+    def _create_sqlite_indexes(self, indexes: List[tuple]):
+        """Create indexes in SQLite"""
+        conn = self.db.connect()
+        cursor = conn.cursor()
+        
+        for index_name, table_name, columns in indexes:
+            try:
+                # Check if index exists
+                cursor.execute("""
+                    SELECT name FROM sqlite_master 
+                    WHERE type='index' AND name=?
+                """, (index_name,))
+                
+                if not cursor.fetchone():
+                    # Create index
+                    if ',' in columns:
+                        # Composite index
+                        column_list = columns
+                    else:
+                        column_list = columns
+                    
+                    cursor.execute(f"""
+                        CREATE INDEX IF NOT EXISTS {index_name}
+                        ON {table_name}({column_list})
+                    """)
+                    print(f"✓ Created index: {index_name}")
+            except sqlite3.OperationalError as e:
+                print(f"✗ Error creating index {index_name}: {e}")
+        
+        conn.commit()
+    
+    def _create_supabase_indexes(self, indexes: List[tuple]):
+        """Create indexes in Supabase (PostgreSQL)"""
+        if not hasattr(self.db, 'supabase') or not self.db.supabase:
+            print("✗ Supabase client not available")
+            return
+        
+        # For Supabase, we'll use SQL execution
+        # Note: Supabase may require service key for index creation
+        try:
+            for index_name, table_name, columns in indexes:
+                # Check if index exists (would need to query pg_indexes)
+                # For now, just attempt to create
+                if ',' in columns:
+                    column_list = columns.replace(',', ', ')
+                else:
+                    column_list = columns
+                
+                sql = f"""
+                    CREATE INDEX IF NOT EXISTS {index_name}
+                    ON {table_name}({column_list})
+                """
+                
+                # Execute via Supabase (if service key available)
+                # This would typically be done via SQL editor in Supabase dashboard
+                print(f"⚠ Index SQL for {index_name}: {sql}")
+                print("   Note: Run this in Supabase SQL editor with service key")
+        except Exception as e:
+            print(f"✗ Error creating Supabase indexes: {e}")
+    
+    def migrate_schema(self):
+        """Run all pending migrations"""
+        migrations = [
+            self._migration_add_warmup_columns,
+            self._migration_add_oauth_columns,
+            self._migration_add_llm_tracking,
+            self._migration_add_metrics_tables,
+            self._migration_add_email_verification,
+        ]
+        
+        for migration in migrations:
+            try:
+                migration()
+            except Exception as e:
+                print(f"✗ Migration failed: {migration.__name__}: {e}")
+    
+    def _migration_add_warmup_columns(self):
+        """Add warmup tracking columns to smtp_servers"""
+        conn = self.db.connect()
+        cursor = conn.cursor()
+        
+        columns_to_add = [
+            ('warmup_stage', 'INTEGER DEFAULT 0'),
+            ('warmup_emails_sent', 'INTEGER DEFAULT 0'),
+            ('warmup_start_date', 'TIMESTAMP'),
+            ('warmup_last_sent_date', 'TIMESTAMP'),
+            ('warmup_open_rate', 'REAL DEFAULT 0.0'),
+            ('warmup_reply_rate', 'REAL DEFAULT 0.0'),
+        ]
+        
+        for column_name, column_type in columns_to_add:
+            try:
+                cursor.execute(f"""
+                    ALTER TABLE smtp_servers 
+                    ADD COLUMN {column_name} {column_type}
+                """)
+                print(f"✓ Added column: smtp_servers.{column_name}")
+            except sqlite3.OperationalError:
+                # Column already exists
+                pass
+        
+        conn.commit()
+    
+    def _migration_add_oauth_columns(self):
+        """Add OAuth columns to smtp_servers"""
+        conn = self.db.connect()
+        cursor = conn.cursor()
+        
+        columns_to_add = [
+            ('oauth_token', 'TEXT'),
+            ('oauth_refresh_token', 'TEXT'),
+        ]
+        
+        for column_name, column_type in columns_to_add:
+            try:
+                cursor.execute(f"""
+                    ALTER TABLE smtp_servers 
+                    ADD COLUMN {column_name} {column_type}
+                """)
+                print(f"✓ Added column: smtp_servers.{column_name}")
+            except sqlite3.OperationalError:
+                pass
+        
+        conn.commit()
+    
+    def _migration_add_llm_tracking(self):
+        """Add LLM usage tracking to app_settings"""
+        # This is handled by settings_manager, but we ensure the table exists
+        conn = self.db.connect()
+        cursor = conn.cursor()
+        
+        # Ensure app_settings table exists with user_id
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    setting_key TEXT NOT NULL,
+                    setting_value TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, setting_key),
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                )
+            """)
+            
+            # Add user_id if it doesn't exist
+            try:
+                cursor.execute("ALTER TABLE app_settings ADD COLUMN user_id INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            
+            conn.commit()
+            print("✓ LLM tracking table ready")
+        except sqlite3.OperationalError as e:
+            print(f"✗ Error: {e}")
+    
+    def _migration_add_metrics_tables(self):
+        """Add metrics and observability tables"""
+        conn = self.db.connect()
+        cursor = conn.cursor()
+        
+        # Metrics table for observability
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                metric_type TEXT NOT NULL,
+                metric_name TEXT NOT NULL,
+                metric_value REAL,
+                metric_data TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        
+        # Alerts table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                alert_type TEXT NOT NULL,
+                alert_message TEXT NOT NULL,
+                alert_level TEXT DEFAULT 'warning',
+                is_resolved INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        
+        conn.commit()
+        print("✓ Metrics tables created")
+    
+    def _migration_add_email_verification(self):
+        """Add email verification columns to users table"""
+        conn = self.db.connect()
+        cursor = conn.cursor()
+        
+        columns_to_add = [
+            ('email_verified', 'INTEGER DEFAULT 0'),
+            ('email_verification_token', 'TEXT'),
+            ('email_verification_sent_at', 'TIMESTAMP'),
+            ('one_time_password', 'TEXT'),
+            ('account_activated_at', 'TIMESTAMP'),
+            ('onboarding_completed', 'INTEGER DEFAULT 0'),
+            ('onboarding_step', 'INTEGER DEFAULT 0'),
+            ('onboarding_data', 'TEXT'),
+        ]
+        
+        for column_name, column_type in columns_to_add:
+            try:
+                cursor.execute(f"""
+                    ALTER TABLE users 
+                    ADD COLUMN {column_name} {column_type}
+                """)
+                print(f"✓ Added column: users.{column_name}")
+            except sqlite3.OperationalError:
+                # Column already exists
+                pass
+        
+        # Create usage_counters table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS usage_counters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                counter_type TEXT NOT NULL,
+                current_value INTEGER DEFAULT 0,
+                reset_date DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                UNIQUE(user_id, counter_type)
+            )
+        """)
+        
+        conn.commit()
+        print("✓ Usage counters table created")
+        
+        # Create domains table for DNS verification
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS domains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                domain TEXT NOT NULL,
+                spf_verified INTEGER DEFAULT 0,
+                dkim_verified INTEGER DEFAULT 0,
+                dmarc_verified INTEGER DEFAULT 0,
+                dkim_public_key TEXT,
+                dkim_private_key TEXT,
+                dkim_selector TEXT,
+                verification_status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                UNIQUE(user_id, domain)
+            )
+        """)
+        
+        conn.commit()
+        print("✓ Domains table created")
+        
+        # Create banned_domains table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS banned_domains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT NOT NULL UNIQUE,
+                reason TEXT,
+                banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create user_fingerprints table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_fingerprints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                ip_address TEXT,
+                user_agent TEXT,
+                browser_fingerprint TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        
+        conn.commit()
+        print("✓ Abuse prevention tables created")
+        
+        # Add personalization_prompt column to campaigns table
+        try:
+            cursor.execute("ALTER TABLE campaigns ADD COLUMN personalization_prompt TEXT")
+            print("✓ Added personalization_prompt column to campaigns")
+        except sqlite3.OperationalError:
+            pass  # Column may already exist
+        
+        # Ensure email_tracking table exists with proper schema
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS email_tracking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                campaign_id INTEGER,
+                recipient_id INTEGER,
+                email_address TEXT NOT NULL,
+                event_type TEXT DEFAULT 'sent',
+                sent_at TIMESTAMP,
+                opened_at TIMESTAMP,
+                clicked_at TIMESTAMP,
+                bounced INTEGER DEFAULT 0,
+                unsubscribed INTEGER DEFAULT 0,
+                bounce_type TEXT,
+                bounce_reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (campaign_id) REFERENCES campaigns(id),
+                FOREIGN KEY (recipient_id) REFERENCES recipients(id)
+            )
+        """)
+        
+        # Add missing columns to email_tracking if they don't exist
+        columns_to_add = [
+            ('user_id', 'INTEGER'),
+            ('event_type', 'TEXT DEFAULT \'sent\''),
+            ('bounce_type', 'TEXT'),
+            ('bounce_reason', 'TEXT'),
+        ]
+        for col_name, col_type in columns_to_add:
+            try:
+                cursor.execute(f"ALTER TABLE email_tracking ADD COLUMN {col_name} {col_type}")
+                print(f"✓ Added column: email_tracking.{col_name}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+        
+        # Update daily_stats to include user_id
+        try:
+            cursor.execute("ALTER TABLE daily_stats ADD COLUMN user_id INTEGER")
+            print("✓ Added user_id column to daily_stats")
+        except sqlite3.OperationalError:
+            pass
+        
+        # Remove UNIQUE constraint on date if it exists and add unique on (user_id, date)
+        try:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_stats_user_date ON daily_stats(user_id, date)")
+        except sqlite3.OperationalError:
+            pass
+        
+        conn.commit()
+        print("✓ Email tracking table and columns updated")
+    
+    def validate_tenant_isolation(self) -> List[Dict]:
+        """Validate that all queries properly filter by user_id"""
+        # This is a static analysis helper - would need to check code
+        # For now, return a checklist
+        return [
+            {
+                'table': 'campaigns',
+                'has_user_id': True,
+                'validated': False
+            },
+            {
+                'table': 'leads',
+                'has_user_id': True,
+                'validated': False
+            },
+            {
+                'table': 'recipients',
+                'has_user_id': True,
+                'validated': False
+            },
+            {
+                'table': 'smtp_servers',
+                'has_user_id': True,
+                'validated': False
+            },
+        ]
+
+
