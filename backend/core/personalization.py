@@ -218,23 +218,30 @@ Return ONLY the personalized email content, no additional text or explanations. 
                 settings = SettingsManager(self.db)
                 
                 # Record token usage
-                quota_mgr.record_llm_usage(self.user_id, total_tokens)
+                try:
+                    quota_mgr.record_llm_usage(self.user_id, total_tokens)
+                except Exception as quota_error:
+                    print(f"⚠ Warning: Could not record LLM usage quota: {quota_error}")
                 
                 # Record cost
-                current_cost = settings.get_setting('llm_cost_this_month', user_id=self.user_id) or '0'
                 try:
+                    current_cost = settings.get_setting('llm_cost_this_month', user_id=self.user_id) or '0'
                     new_cost = float(current_cost) + cost
                     settings.set_setting('llm_cost_this_month', str(new_cost), user_id=self.user_id)
-                except:
-                    pass
+                except Exception as cost_error:
+                    print(f"⚠ Warning: Could not record LLM cost: {cost_error}")
                 
-                # Record metric for observability
-                obs_mgr.record_metric(self.user_id, 'llm', 'tokens_used', float(total_tokens), {
-                    'prompt_tokens': prompt_tokens,
-                    'completion_tokens': completion_tokens,
-                    'cost': cost,
-                    'model': self.model
-                })
+                # Record metric for observability (wrap in try-except to not break personalization)
+                try:
+                    obs_mgr.record_metric(self.user_id, 'llm', 'tokens_used', float(total_tokens), {
+                        'prompt_tokens': prompt_tokens,
+                        'completion_tokens': completion_tokens,
+                        'cost': cost,
+                        'model': self.model
+                    })
+                except Exception as metric_error:
+                    # Metrics recording failure should not break personalization
+                    print(f"⚠ Warning: Could not record LLM metric: {metric_error}")
                 
                 # Record LLM usage metrics (aggregated by date)
                 try:

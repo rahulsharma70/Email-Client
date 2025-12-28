@@ -49,6 +49,16 @@
     color: white;
 }
 
+.status-badge.paused {
+    background: #f39c12;
+    color: white;
+}
+
+.status-badge.stopped {
+    background: #e74c3c;
+    color: white;
+}
+
 #campaignsTable input[type="checkbox"] {
     cursor: pointer;
     width: 18px;
@@ -102,7 +112,7 @@
                 <td>{{ campaign.name }}</td>
                 <td>{{ campaign.subject }}</td>
                 <td>
-                    <span class="status-badge {{ 'sent' if campaign.status == 'sent' else 'draft' if campaign.status == 'draft' else 'sending' }}">
+                    <span class="status-badge {% if campaign.status == 'sent' %}sent{% elif campaign.status == 'draft' %}draft{% elif campaign.status == 'paused' %}paused{% elif campaign.status == 'stopped' %}stopped{% else %}sending{% endif %}">
                         {{ campaign.status }}
                     </span>
                 </td>
@@ -112,6 +122,22 @@
                     <button class="btn btn-success btn-sm" onclick="sendCampaign({{ campaign.id }}, '{{ campaign.name }}')" style="margin-right: 5px;">
                         <i class="fas fa-paper-plane"></i> Send
                     </button>
+                    {% elif campaign.status == 'sending' %}
+                    <button class="btn btn-warning btn-sm" onclick="pauseCampaign({{ campaign.id }}, '{{ campaign.name }}')" style="margin-right: 5px;">
+                        <i class="fas fa-pause"></i> Pause
+                    </button>
+                    <button class="btn btn-danger btn-sm" onclick="stopCampaign({{ campaign.id }}, '{{ campaign.name }}')" style="margin-right: 5px;">
+                        <i class="fas fa-stop"></i> Stop
+                    </button>
+                    {% elif campaign.status in ['paused', 'stopped'] %}
+                    <button class="btn btn-success btn-sm" onclick="resumeCampaign({{ campaign.id }}, '{{ campaign.name }}')" style="margin-right: 5px;">
+                        <i class="fas fa-play"></i> Resume
+                    </button>
+                    {% if campaign.status == 'stopped' %}
+                    <button class="btn btn-danger btn-sm" onclick="stopCampaign({{ campaign.id }}, '{{ campaign.name }}')" style="margin-right: 5px;" disabled title="Already stopped">
+                        <i class="fas fa-stop"></i> Stop
+                    </button>
+                    {% endif %}
                     {% endif %}
                     <button class="btn btn-danger btn-sm" onclick="deleteCampaign({{ campaign.id }}, '{{ campaign.name }}')">
                         <i class="fas fa-trash"></i> Delete
@@ -297,6 +323,57 @@ async function sendSelectedCampaigns() {
     }
 }
 
+async function pauseCampaign(campaignId, campaignName) {
+    if (!confirm(`Are you sure you want to pause campaign "${campaignName}"?\n\nThis will temporarily stop sending emails from this campaign. You can resume it later.`)) {
+        return;
+    }
+    
+    try {
+        showAlert('Pausing campaign...', 'info');
+        const response = await axios.post(`/api/campaigns/pause/${campaignId}`);
+        if (response.data.success) {
+            showAlert('Campaign paused successfully!', 'success');
+            refreshCampaigns();
+        }
+    } catch (error) {
+        showAlert('Error pausing campaign: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function resumeCampaign(campaignId, campaignName) {
+    if (!confirm(`Are you sure you want to resume campaign "${campaignName}"?\n\nThis will continue sending emails from this campaign.`)) {
+        return;
+    }
+    
+    try {
+        showAlert('Resuming campaign...', 'info');
+        const response = await axios.post(`/api/campaigns/resume/${campaignId}`);
+        if (response.data.success) {
+            showAlert('Campaign resumed successfully!', 'success');
+            refreshCampaigns();
+        }
+    } catch (error) {
+        showAlert('Error resuming campaign: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
+async function stopCampaign(campaignId, campaignName) {
+    if (!confirm(`⚠️ WARNING: Are you sure you want to STOP campaign "${campaignName}"?\n\nThis will permanently stop the campaign and skip all remaining emails in the queue.\n\nYou can resume it later, but stopped emails will not be automatically retried.`)) {
+        return;
+    }
+    
+    try {
+        showAlert('Stopping campaign...', 'info');
+        const response = await axios.post(`/api/campaigns/stop/${campaignId}`);
+        if (response.data.success) {
+            showAlert('Campaign stopped successfully!', 'success');
+            refreshCampaigns();
+        }
+    } catch (error) {
+        showAlert('Error stopping campaign: ' + (error.response?.data?.error || error.message), 'error');
+    }
+}
+
 async function refreshCampaigns() {
     try {
         const response = await axios.get('/api/campaigns');
@@ -309,9 +386,37 @@ async function refreshCampaigns() {
         }
         
         tbody.innerHTML = campaigns.map(campaign => {
-            const statusClass = campaign.status === 'sent' ? 'sent' : 
-                               campaign.status === 'draft' ? 'draft' : 'sending';
+            let statusClass = 'sending';
+            if (campaign.status === 'sent') statusClass = 'sent';
+            else if (campaign.status === 'draft') statusClass = 'draft';
+            else if (campaign.status === 'paused') statusClass = 'paused';
+            else if (campaign.status === 'stopped') statusClass = 'stopped';
+            
             const createdDate = campaign.created_at ? campaign.created_at.substring(0, 10) : '-';
+            
+            let actionButtons = '';
+            if (campaign.status === 'draft') {
+                actionButtons = `
+                    <button class="btn btn-success btn-sm" onclick="sendCampaign(${campaign.id}, '${campaign.name.replace(/'/g, "\\'")}')" style="margin-right: 5px;">
+                        <i class="fas fa-paper-plane"></i> Send
+                    </button>
+                `;
+            } else if (campaign.status === 'sending') {
+                actionButtons = `
+                    <button class="btn btn-warning btn-sm" onclick="pauseCampaign(${campaign.id}, '${campaign.name.replace(/'/g, "\\'")}')" style="margin-right: 5px;">
+                        <i class="fas fa-pause"></i> Pause
+                    </button>
+                    <button class="btn btn-danger btn-sm" onclick="stopCampaign(${campaign.id}, '${campaign.name.replace(/'/g, "\\'")}')" style="margin-right: 5px;">
+                        <i class="fas fa-stop"></i> Stop
+                    </button>
+                `;
+            } else if (campaign.status === 'paused' || campaign.status === 'stopped') {
+                actionButtons = `
+                    <button class="btn btn-success btn-sm" onclick="resumeCampaign(${campaign.id}, '${campaign.name.replace(/'/g, "\\'")}')" style="margin-right: 5px;">
+                        <i class="fas fa-play"></i> Resume
+                    </button>
+                `;
+            }
             
             return `
             <tr data-campaign-id="${campaign.id}" data-campaign-status="${campaign.status}">
@@ -327,11 +432,7 @@ async function refreshCampaigns() {
                 </td>
                 <td>${createdDate}</td>
                 <td>
-                    ${campaign.status === 'draft' ? `
-                    <button class="btn btn-success btn-sm" onclick="sendCampaign(${campaign.id}, '${campaign.name.replace(/'/g, "\\'")}')" style="margin-right: 5px;">
-                        <i class="fas fa-paper-plane"></i> Send
-                    </button>
-                    ` : ''}
+                    ${actionButtons}
                     <button class="btn btn-danger btn-sm" onclick="deleteCampaign(${campaign.id}, '${campaign.name.replace(/'/g, "\\'")}')">
                         <i class="fas fa-trash"></i> Delete
                     </button>

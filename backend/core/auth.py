@@ -144,31 +144,31 @@ class AuthManager:
                         'success': False,
                         'error': 'User with this email already exists'
                     }
-            
-            # Hash password
-            password_hash = self.hash_password(password)
-            
-            # Create user with email verification fields
-            cursor.execute("""
-                INSERT INTO users (email, password_hash, first_name, last_name, company_name, subscription_plan,
-                                  email_verified, email_verification_token, email_verification_sent_at)
-                VALUES (?, ?, ?, ?, ?, 'free', 0, ?, ?)
-            """, (email.lower().strip(), password_hash, first_name, last_name, company_name, 
-                  verification_token, sent_at))
-            
-            user_id = cursor.lastrowid
-            conn.commit()
-            
-            # Send verification email
-            email_result = email_verification.send_verification_email(email, verification_token, user_id)
-            
-            return {
-                'success': True,
-                'user_id': user_id,
-                'email': email,
-                'email_sent': email_result.get('success', False),
-                'message': 'Registration successful. Please check your email to verify your account.'
-            }
+                
+                # Hash password
+                password_hash = self.hash_password(password)
+                
+                # Create user with email verification fields
+                cursor.execute("""
+                    INSERT INTO users (email, password_hash, first_name, last_name, company_name, subscription_plan,
+                                      email_verified, email_verification_token, email_verification_sent_at)
+                    VALUES (?, ?, ?, ?, ?, 'free', 0, ?, ?)
+                """, (email.lower().strip(), password_hash, first_name, last_name, company_name, 
+                      verification_token, sent_at))
+                
+                user_id = cursor.lastrowid
+                conn.commit()
+                
+                # Send verification email
+                email_result = email_verification.send_verification_email(email, verification_token, user_id)
+                
+                return {
+                    'success': True,
+                    'user_id': user_id,
+                    'email': email,
+                    'email_sent': email_result.get('success', False),
+                    'message': 'Registration successful. Please check your email to verify your account.'
+                }
     
     def login_user(self, email: str, password: str) -> Dict:
         """

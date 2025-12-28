@@ -192,20 +192,16 @@ class QuotaManager:
         plan = self.get_user_plan(user_id)
         limit = self.PLAN_LIMITS[plan]['llm_tokens_per_month']
         
-        now = datetime.now()
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        # Use SettingsManager to get LLM usage (works with both SQLite and Supabase)
+        from database.settings_manager import SettingsManager
+        settings = SettingsManager(self.db)
         
-        conn = self.db.connect()
-        cursor = conn.cursor()
-        
-        # Get LLM usage this month (stored in app_settings or tracking table)
-        cursor.execute("""
-            SELECT setting_value FROM app_settings
-            WHERE user_id = ? AND setting_key = 'llm_tokens_used_this_month'
-        """, (user_id,))
-        
-        result = cursor.fetchone()
-        tokens_used = int(result[0]) if result and result[0] else 0
+        # Get LLM usage this month
+        tokens_used_str = settings.get_setting('llm_tokens_used_this_month', user_id=user_id, default='0')
+        try:
+            tokens_used = int(tokens_used_str)
+        except (ValueError, TypeError):
+            tokens_used = 0
         
         remaining = limit - tokens_used
         
@@ -227,34 +223,28 @@ class QuotaManager:
     
     def record_llm_usage(self, user_id: int, tokens: int):
         """Record LLM token usage and cost"""
-        conn = self.db.connect()
-        cursor = conn.cursor()
+        from database.settings_manager import SettingsManager
+        settings = SettingsManager(self.db)
         
         # Get current usage
-        cursor.execute("""
-            SELECT setting_value FROM app_settings
-            WHERE user_id = ? AND setting_key = 'llm_tokens_used_this_month'
-        """, (user_id,))
-        
-        result = cursor.fetchone()
-        current = int(result[0]) if result and result[0] else 0
+        current_str = settings.get_setting('llm_tokens_used_this_month', user_id=user_id, default='0')
+        try:
+            current = int(current_str)
+        except (ValueError, TypeError):
+            current = 0
         
         # Calculate cost (approximate: $0.002 per 1K tokens)
         cost_per_1k_tokens = 0.002
         cost = (tokens / 1000) * cost_per_1k_tokens
         
         # Get current cost
-        cursor.execute("""
-            SELECT setting_value FROM app_settings
-            WHERE user_id = ? AND setting_key = 'llm_cost_this_month'
-        """, (user_id,))
-        
-        result = cursor.fetchone()
-        current_cost = float(result[0]) if result and result[0] else 0.0
+        current_cost_str = settings.get_setting('llm_cost_this_month', user_id=user_id, default='0.0')
+        try:
+            current_cost = float(current_cost_str)
+        except (ValueError, TypeError):
+            current_cost = 0.0
         
         # Update usage and cost
-        from database.settings_manager import SettingsManager
-        settings = SettingsManager(self.db)
         settings.set_setting('llm_tokens_used_this_month', str(current + tokens), user_id=user_id)
         settings.set_setting('llm_cost_this_month', str(current_cost + cost), user_id=user_id)
     
@@ -279,20 +269,14 @@ class QuotaManager:
             
             cost_limit = COST_LIMITS.get(plan, COST_LIMITS['start'])
             
-            # Get current cost
-            conn = self.db.connect()
-            cursor = conn.cursor()
-            
-            if hasattr(self.db, 'use_supabase') and self.db.use_supabase:
-                result = self.db.supabase.client.table('app_settings').select('setting_value').eq('user_id', user_id).eq('setting_key', 'llm_cost_this_month').execute()
-                current_cost = float(result.data[0]['setting_value']) if result.data and len(result.data) > 0 and result.data[0].get('setting_value') else 0.0
-            else:
-                cursor.execute("""
-                    SELECT setting_value FROM app_settings
-                    WHERE user_id = ? AND setting_key = 'llm_cost_this_month'
-                """, (user_id,))
-                result = cursor.fetchone()
-                current_cost = float(result[0]) if result and result[0] else 0.0
+            # Get current cost using SettingsManager (works with both SQLite and Supabase)
+            from database.settings_manager import SettingsManager
+            settings = SettingsManager(self.db)
+            current_cost_str = settings.get_setting('llm_cost_this_month', user_id=user_id, default='0.0')
+            try:
+                current_cost = float(current_cost_str)
+            except (ValueError, TypeError):
+                current_cost = 0.0
             
             # Estimate cost for this request
             cost_per_1k_tokens = 0.002

@@ -177,7 +177,13 @@ class EmailSender:
                     print(f"[{thread_name}] Waiting {self.interval} seconds before next email...")
                     time.sleep(self.interval)
                 else:
-                    # No items in queue, wait a bit
+                    # No items in queue, check for skipped emails that can be retried
+                    try:
+                        self._retry_warmup_blocked_emails()
+                    except Exception as retry_error:
+                        print(f"⚠ Error checking for warmup retries: {retry_error}")
+                    
+                    # Wait a bit before checking again
                     time.sleep(2)
                     
             except Exception as e:
@@ -194,7 +200,8 @@ class EmailSender:
             
             if use_supabase:
                 # Supabase: Get pending queue items with joins
-                # First, get pending queue items (will filter nulls and inactive SMTP in Python)
+                # First, get pending queue items for campaigns that are NOT paused/stopped
+                # We need to filter by campaign status, so we'll do it in two steps or use a join
                 queue_result = self.db.supabase.client.table('email_queue').select(
                     'id, campaign_id, recipient_id, smtp_server_id, status, priority, created_at'
                 ).eq('status', 'pending').order('created_at', desc=False).limit(100).execute()
@@ -231,10 +238,10 @@ class EmailSender:
                         # Race condition - another thread got it, try next
                         continue
                     
-                    # Get campaign data
+                    # Get campaign data (including status) - filter out paused/stopped campaigns in query
                     camp_result = self.db.supabase.client.table('campaigns').select(
-                        'name, subject, sender_name, sender_email, reply_to, html_content, use_personalization, personalization_prompt, user_id'
-                    ).eq('id', campaign_id).execute()
+                        'name, subject, sender_name, sender_email, reply_to, html_content, use_personalization, personalization_prompt, user_id, status'
+                    ).eq('id', campaign_id).not_.in_('status', ['paused', 'stopped']).execute()
                     
                     if not camp_result.data or len(camp_result.data) == 0:
                         # Mark as failed and try next
@@ -242,6 +249,16 @@ class EmailSender:
                         continue
                     
                     campaign = camp_result.data[0]
+                    
+                    # Check campaign status - skip if paused or stopped
+                    campaign_status = campaign.get('status', 'sending')
+                    if campaign_status in ['paused', 'stopped']:
+                        # Mark queue item as skipped if campaign is paused/stopped
+                        self.db.supabase.client.table('email_queue').update({
+                            'status': 'skipped',
+                            'error_message': f'Campaign is {campaign_status}'
+                        }).eq('id', queue_id).execute()
+                        continue
                     
                     # Get recipient data
                     rec_result = self.db.supabase.client.table('recipients').select(
@@ -347,8 +364,8 @@ class EmailSender:
                 # Use a transaction with row-level locking to prevent duplicate processing
                 cursor.execute("""
                     SELECT eq.id as queue_id, eq.campaign_id, eq.recipient_id, eq.smtp_server_id,
-                           c.name as campaign_name, c.subject, c.sender_name, c.sender_email, 
-                           c.reply_to, c.html_content, c.use_personalization, c.personalization_prompt, c.user_id,
+                           c.name as campaign_name, c.subject, c.sender_name, c.sender_email,
+                           c.reply_to, c.html_content, c.use_personalization, c.personalization_prompt, c.user_id, c.status as campaign_status,
                            r.email, r.first_name, r.last_name, r.company, r.city, r.is_unsubscribed,
                            s.host, s.port, s.username, s.password, s.use_tls, s.use_ssl, s.is_active
                     FROM email_queue eq
@@ -356,6 +373,7 @@ class EmailSender:
                     JOIN recipients r ON eq.recipient_id = r.id
                     INNER JOIN smtp_servers s ON eq.smtp_server_id = s.id
                     WHERE eq.status = 'pending' 
+                      AND c.status NOT IN ('paused', 'stopped')
                       AND r.is_unsubscribed = 0 
                       AND s.is_active = 1 
                       AND s.password IS NOT NULL 
@@ -383,6 +401,19 @@ class EmailSender:
                         return None
                     
                     conn.commit()
+                    
+                    # Double-check campaign status (should already be filtered in query, but verify)
+                    campaign_status = queue_item.get('campaign_status', 'sending')
+                    if campaign_status in ['paused', 'stopped']:
+                        # Mark as skipped
+                        cursor.execute("""
+                            UPDATE email_queue 
+                            SET status = 'skipped', error_message = ?
+                            WHERE id = ?
+                        """, (f'Campaign is {campaign_status}', queue_id))
+                        conn.commit()
+                        return None  # Try next item
+                    
                     smtp_id = queue_item.get('smtp_server_id')
                     smtp_username = queue_item.get('username', 'N/A')
                     print(f"[{threading.current_thread().name}] Locked queue item {queue_id} for processing")
@@ -438,7 +469,15 @@ class EmailSender:
                 # Check warmup
                 warmup_check = warmup_manager.can_send_email(smtp_server_id)
                 if not warmup_check.get('can_send'):
-                    self.mark_failed(queue_item['queue_id'], f"Warmup limit: {warmup_check.get('reason')}")
+                    # Instead of marking as permanently failed, mark as 'pending' with a retry_after timestamp
+                    # This allows automatic retry after the warmup limit resets
+                    reset_time = warmup_check.get('reset_time')
+                    error_msg = f"Warmup limit: {warmup_check.get('reason')}"
+                    
+                    # Mark as skipped (not failed) so it can be retried automatically
+                    # We'll add a retry_after field or use error_message to store reset time
+                    self.mark_skipped(queue_item['queue_id'], error_msg)
+                    print(f"⏸️  Email skipped due to warmup limit. Will retry after: {reset_time}")
                     return
                 
                 # Use warmup delay if available
@@ -1869,6 +1908,100 @@ class EmailSender:
                 conn.commit()
         except Exception as e:
             print(f"Error marking email as skipped: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _retry_warmup_blocked_emails(self):
+        """Automatically retry emails that were blocked due to warmup limits after 24h"""
+        try:
+            from datetime import datetime, timedelta
+            from core.warmup_manager import WarmupManager
+            
+            warmup_manager = WarmupManager(self.db)
+            
+            # Check if using Supabase
+            use_supabase = hasattr(self.db, 'use_supabase') and self.db.use_supabase
+            
+            if use_supabase:
+                # Find skipped emails with "Warmup limit" in error message
+                result = self.db.supabase.client.table('email_queue').select(
+                    'id, smtp_server_id, error_message, created_at'
+                ).eq('status', 'skipped').like('error_message', '%Warmup limit%').execute()
+                
+                if not result.data:
+                    return
+                
+                retried_count = 0
+                now = datetime.now()
+                
+                for item in result.data:
+                    smtp_server_id = item.get('smtp_server_id')
+                    if not smtp_server_id:
+                        continue
+                    
+                    # Check if warmup limit has reset for this SMTP server
+                    warmup_check = warmup_manager.can_send_email(smtp_server_id)
+                    
+                    if warmup_check.get('can_send', False):
+                        # Warmup limit has reset, retry this email
+                        queue_id = item['id']
+                        try:
+                            self.db.supabase.client.table('email_queue').update({
+                                'status': 'pending',
+                                'error_message': None
+                            }).eq('id', queue_id).execute()
+                            retried_count += 1
+                            print(f"✓ Automatically retrying email {queue_id} (warmup limit reset)")
+                        except Exception as retry_error:
+                            print(f"⚠ Error retrying email {queue_id}: {retry_error}")
+                
+                if retried_count > 0:
+                    print(f"🔄 Automatically retried {retried_count} emails that were blocked by warmup limits")
+            else:
+                # SQLite
+                conn = self.db.connect()
+                cursor = conn.cursor()
+                
+                # Find skipped emails with "Warmup limit" in error message
+                cursor.execute("""
+                    SELECT id, smtp_server_id, error_message, created_at
+                    FROM email_queue
+                    WHERE status = 'skipped' 
+                    AND error_message LIKE '%Warmup limit%'
+                """)
+                
+                items = cursor.fetchall()
+                if not items:
+                    return
+                
+                retried_count = 0
+                
+                for item in items:
+                    queue_id = item[0]
+                    smtp_server_id = item[1]
+                    
+                    if not smtp_server_id:
+                        continue
+                    
+                    # Check if warmup limit has reset for this SMTP server
+                    warmup_check = warmup_manager.can_send_email(smtp_server_id)
+                    
+                    if warmup_check.get('can_send', False):
+                        # Warmup limit has reset, retry this email
+                        cursor.execute("""
+                            UPDATE email_queue
+                            SET status = 'pending', error_message = NULL
+                            WHERE id = ?
+                        """, (queue_id,))
+                        retried_count += 1
+                        print(f"✓ Automatically retrying email {queue_id} (warmup limit reset)")
+                
+                if retried_count > 0:
+                    conn.commit()
+                    print(f"🔄 Automatically retried {retried_count} emails that were blocked by warmup limits")
+                    
+        except Exception as e:
+            print(f"⚠ Error in _retry_warmup_blocked_emails: {e}")
             import traceback
             traceback.print_exc()
 

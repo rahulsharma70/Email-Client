@@ -3937,6 +3937,207 @@ def api_delete_draft_campaigns(user_id):
         print(f"Error deleting draft campaigns: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/campaigns/pause/<int:campaign_id>', methods=['POST'])
+@require_auth
+def api_pause_campaign(campaign_id, user_id):
+    """Pause a sending campaign"""
+    try:
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
+        
+        # Get campaign
+        if use_supabase:
+            result = db.supabase.client.table('campaigns').select('id, status, user_id').eq('id', campaign_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Campaign not found'}), 404
+            campaign = result.data[0]
+        else:
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, status, user_id FROM campaigns WHERE id = ?", (campaign_id,))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({'error': 'Campaign not found'}), 404
+            campaign = {'id': row[0], 'status': row[1], 'user_id': row[2]}
+        
+        # Check if campaign belongs to user
+        if campaign.get('user_id') != user_id:
+            return jsonify({'error': 'Campaign not found or access denied'}), 404
+        
+        # Only allow pausing if status is 'sending'
+        if campaign.get('status') != 'sending':
+            return jsonify({'error': f'Can only pause campaigns with status "sending" (current: {campaign.get("status")})'}), 400
+        
+        # Update campaign status to 'paused'
+        if use_supabase:
+            db.supabase.client.table('campaigns').update({'status': 'paused'}).eq('id', campaign_id).execute()
+        else:
+            cursor.execute("UPDATE campaigns SET status = 'paused' WHERE id = ?", (campaign_id,))
+            conn.commit()
+        
+        return jsonify({'success': True, 'message': 'Campaign paused successfully'})
+    except Exception as e:
+        import traceback
+        print(f"Error pausing campaign: {traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/campaigns/resume/<int:campaign_id>', methods=['POST'])
+@require_auth
+def api_resume_campaign(campaign_id, user_id):
+    """Resume a paused/stopped campaign"""
+    try:
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
+        
+        # Get campaign and initialize connection if using SQLite
+        conn = None
+        cursor = None
+        if use_supabase:
+            result = db.supabase.client.table('campaigns').select('id, status, user_id').eq('id', campaign_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Campaign not found'}), 404
+            campaign = result.data[0]
+        else:
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, status, user_id FROM campaigns WHERE id = ?", (campaign_id,))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({'error': 'Campaign not found'}), 404
+            campaign = {'id': row[0], 'status': row[1], 'user_id': row[2]}
+        
+        # Check if campaign belongs to user
+        if campaign.get('user_id') != user_id:
+            return jsonify({'error': 'Campaign not found or access denied'}), 404
+        
+        # Only allow resuming if status is 'paused' or 'stopped'
+        current_status = campaign.get('status')
+        if current_status not in ['paused', 'stopped']:
+            return jsonify({'error': f'Can only resume campaigns with status "paused" or "stopped" (current: {current_status})'}), 400
+        
+        # Update campaign status to 'sending' and reset skipped queue items back to pending
+        if use_supabase:
+            db.supabase.client.table('campaigns').update({'status': 'sending'}).eq('id', campaign_id).execute()
+            # Reset skipped queue items back to pending (those skipped due to pause/stop)
+            # Get skipped items with pause/stop messages - do it in batches to avoid query complexity
+            try:
+                # Get all skipped items for this campaign
+                skipped_result = db.supabase.client.table('email_queue').select('id, error_message').eq('campaign_id', campaign_id).eq('status', 'skipped').execute()
+                if skipped_result.data:
+                    # Filter in Python for pause/stop messages
+                    paused_stopped_ids = [
+                        item['id'] for item in skipped_result.data 
+                        if item.get('error_message') and ('Campaign is paused' in item['error_message'] or 'Campaign is stopped' in item['error_message'])
+                    ]
+                    # Update them back to pending
+                    if paused_stopped_ids:
+                        for skipped_id in paused_stopped_ids:
+                            db.supabase.client.table('email_queue').update({
+                                'status': 'pending',
+                                'error_message': None
+                            }).eq('id', skipped_id).execute()
+            except Exception as resume_error:
+                print(f"⚠ Could not reset skipped emails on resume: {resume_error}")
+                # Continue anyway - campaign is resumed
+        else:
+            # Use the connection and cursor we already have
+            cursor.execute("UPDATE campaigns SET status = 'sending' WHERE id = ?", (campaign_id,))
+            cursor.execute("""
+                UPDATE email_queue 
+                SET status = 'pending', error_message = NULL
+                WHERE campaign_id = ? 
+                AND status = 'skipped' 
+                AND (error_message LIKE '%Campaign is paused%' OR error_message LIKE '%Campaign is stopped%')
+            """, (campaign_id,))
+            conn.commit()
+        
+        # Ensure email sender is running to process the resumed campaign
+        global email_sender
+        import threading
+        
+        def start_sender():
+            try:
+                global email_sender
+                if not email_sender or not hasattr(email_sender, 'is_sending') or not email_sender.is_sending:
+                    # Get delay from settings
+                    email_delay = db.get_email_delay()
+                    email_sender = EmailSender(db, interval=float(email_delay), max_threads=1)
+                    email_sender.start_sending()
+                    print(f"✓ Email sender started after resuming campaign {campaign_id} ({email_delay} sec delay)")
+                else:
+                    print("ℹ Email sender already running, resumed campaign will be processed")
+            except Exception as e:
+                print(f"✗ Error starting email sender after resume: {e}")
+        
+        sender_thread = threading.Thread(target=start_sender, daemon=True)
+        sender_thread.start()
+        
+        # Give it a moment to start
+        import time
+        time.sleep(0.5)
+        
+        return jsonify({'success': True, 'message': 'Campaign resumed successfully'})
+    except Exception as e:
+        import traceback
+        print(f"Error resuming campaign: {traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/campaigns/stop/<int:campaign_id>', methods=['POST'])
+@require_auth
+def api_stop_campaign(campaign_id, user_id):
+    """Stop a sending campaign (permanent stop)"""
+    try:
+        # Check if using Supabase FIRST before trying to use SQLite methods
+        use_supabase = hasattr(db, 'use_supabase') and db.use_supabase
+        
+        # Get campaign
+        if use_supabase:
+            result = db.supabase.client.table('campaigns').select('id, status, user_id').eq('id', campaign_id).execute()
+            if not result.data or len(result.data) == 0:
+                return jsonify({'error': 'Campaign not found'}), 404
+            campaign = result.data[0]
+        else:
+            conn = db.connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, status, user_id FROM campaigns WHERE id = ?", (campaign_id,))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({'error': 'Campaign not found'}), 404
+            campaign = {'id': row[0], 'status': row[1], 'user_id': row[2]}
+        
+        # Check if campaign belongs to user
+        if campaign.get('user_id') != user_id:
+            return jsonify({'error': 'Campaign not found or access denied'}), 404
+        
+        # Only allow stopping if status is 'sending' or 'paused'
+        current_status = campaign.get('status')
+        if current_status not in ['sending', 'paused']:
+            return jsonify({'error': f'Can only stop campaigns with status "sending" or "paused" (current: {current_status})'}), 400
+        
+        # Update campaign status to 'stopped'
+        if use_supabase:
+            db.supabase.client.table('campaigns').update({'status': 'stopped'}).eq('id', campaign_id).execute()
+            # Mark pending/processing queue items as skipped
+            db.supabase.client.table('email_queue').update({
+                'status': 'skipped',
+                'error_message': 'Campaign stopped by user'
+            }).eq('campaign_id', campaign_id).in_('status', ['pending', 'processing']).execute()
+        else:
+            cursor.execute("UPDATE campaigns SET status = 'stopped' WHERE id = ?", (campaign_id,))
+            cursor.execute("""
+                UPDATE email_queue 
+                SET status = 'skipped', error_message = 'Campaign stopped by user'
+                WHERE campaign_id = ? 
+                AND status IN ('pending', 'processing')
+            """, (campaign_id,))
+            conn.commit()
+        
+        return jsonify({'success': True, 'message': 'Campaign stopped successfully'})
+    except Exception as e:
+        import traceback
+        print(f"Error stopping campaign: {traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/campaigns/send/<int:campaign_id>', methods=['POST'])
 @require_auth
 def api_send_campaign(campaign_id, user_id):

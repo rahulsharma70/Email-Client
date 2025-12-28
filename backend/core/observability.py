@@ -37,6 +37,8 @@ class ObservabilityManager:
         
         if use_supabase:
             # Use Supabase table methods
+            # Note: metrics table may not exist in all Supabase instances
+            # If it doesn't exist, silently skip (metrics are not critical for email sending)
             try:
                 self.db.supabase.client.table('metrics').insert({
                     'user_id': user_id,
@@ -46,8 +48,16 @@ class ObservabilityManager:
                     'metric_data': metric_data
                 }).execute()
             except Exception as e:
-                print(f"Error recording metric to Supabase: {e}")
-                # Silently fail - metrics are not critical
+                # Check if it's a "table not found" error (PGRST205)
+                # Supabase returns errors as dictionaries in the exception message
+                error_str = str(e)
+                # Skip logging for table not found errors - this is expected
+                # PGRST205 is the error code for table not found in schema cache
+                is_table_not_found = 'PGRST205' in error_str or ('table' in error_str.lower() and 'not found' in error_str.lower())
+                if not is_table_not_found:
+                    # Only log unexpected errors (not table not found)
+                    print(f"Error recording metric to Supabase: {e}")
+                # Silently fail for table not found - metrics are not critical
         else:
             # SQLite
             conn = self.db.connect()

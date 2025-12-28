@@ -136,6 +136,32 @@ class WarmupManager:
             return self.WARMUP_STAGES[-1]
         return self.WARMUP_STAGES[stage - 1]
     
+    def get_warmup_stage_info(self, smtp_server_id: int) -> Optional[Dict]:
+        """
+        Get warmup stage info with configuration for policy enforcement
+        
+        Returns:
+            Dictionary with stage info and config (emails_per_day, spacing_minutes) or None
+        """
+        warmup_info = self.get_warmup_stage(smtp_server_id)
+        if not warmup_info or warmup_info.get('stage', 0) == 0:
+            return None
+        
+        stage = warmup_info.get('stage', 1)
+        stage_config = self.get_stage_config(stage)
+        
+        # Merge stage info with config
+        return {
+            'stage': stage,
+            'emails_per_day': stage_config.get('emails_per_day', 0),
+            'spacing_minutes': stage_config.get('spacing_minutes', 0),
+            'emails_sent': warmup_info.get('emails_sent', 0),
+            'start_date': warmup_info.get('start_date'),
+            'last_sent_date': warmup_info.get('last_sent_date'),
+            'open_rate': warmup_info.get('open_rate', 0.0),
+            'reply_rate': warmup_info.get('reply_rate', 0.0)
+        }
+    
     def calculate_next_send_time(self, smtp_server_id: int) -> Optional[datetime]:
         """Calculate when next warmup email should be sent"""
         warmup_info = self.get_warmup_stage(smtp_server_id)

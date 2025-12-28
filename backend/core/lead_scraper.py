@@ -668,8 +668,8 @@ Return ONLY the JSON array, no additional text."""
             # Step 1: Extract companies (B2B) or individuals (B2C)
             if lead_type == 'B2B':
                 print("Step 1: Extracting companies from ICP (B2B mode)...")
-            companies = self.extract_companies_from_icp(icp_description)
-            print(f"Found {len(companies)} companies")
+                companies = self.extract_companies_from_icp(icp_description)
+                print(f"Found {len(companies)} companies")
             else:
                 print("Step 1: Extracting individual people from ICP (B2C mode)...")
                 individuals = self.extract_individuals_from_icp(icp_description)
